@@ -1,0 +1,4 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+itsdangerous>=2.1
+Pillow>=11.3
