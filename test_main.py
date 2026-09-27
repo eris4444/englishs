@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
 import os
 import re
 import shutil
+import signal
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import anyio
+import httpx
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -63,7 +71,7 @@ def media(tmp_path: Path) -> Path:
 def settings(media: Path, tmp_path: Path) -> main.Settings:
     return main.Settings(
         media_root=media.resolve(),
-        password=PASSWORD,
+        password_hash=main.hash_password(PASSWORD, iterations=1_000),  # fast for tests
         secret_key="test-secret",
         thumb_dir=tmp_path / "thumbs",
         ffmpeg=None,
@@ -93,11 +101,16 @@ def anon(settings: main.Settings) -> TestClient:
 # --------------------------------------------------------------------------- config
 
 
-def test_missing_config_lists_every_problem() -> None:
+def test_missing_config_lists_every_problem(tmp_path: Path) -> None:
     with pytest.raises(main.ConfigError) as err:
-        main.Settings.from_env({})
+        main.Settings.from_env({"MEDIA_ROOT": ""}, app_dir=tmp_path)
     assert "MEDIA_ROOT is not set" in str(err.value)
     assert "MEDIA_PASSWORD is not set" in str(err.value)
+
+
+def test_without_env_or_config_asks_for_setup(tmp_path: Path) -> None:
+    with pytest.raises(main.ConfigError, match="Not set up yet"):
+        main.Settings.from_env({}, app_dir=tmp_path)
 
 
 @pytest.mark.parametrize("make_root, message", [(lambda p: p / "nope", "does not exist"), (lambda p: p / "f", "is not a directory")])
@@ -107,12 +120,24 @@ def test_bad_media_root(tmp_path: Path, make_root, message: str) -> None:
         main.Settings.from_env({"MEDIA_ROOT": str(make_root(tmp_path)), "MEDIA_PASSWORD": "x"}, app_dir=tmp_path)
 
 
-def test_startup_without_media_root_exits_with_message_not_traceback() -> None:
-    env = {k: v for k, v in os.environ.items() if k not in ("MEDIA_ROOT", "MEDIA_PASSWORD")}
-    result = subprocess.run([sys.executable, main.__file__], env=env, capture_output=True, text=True, timeout=60)
+def _run_script(*args: str, **env: str) -> subprocess.CompletedProcess[str]:
+    clean = {k: v for k, v in os.environ.items() if k not in ("MEDIA_ROOT", "MEDIA_PASSWORD", "SECRET_KEY")}
+    return subprocess.run(
+        [sys.executable, main.__file__, *args], env={**clean, "MEDIA_NO_VENV": "1", **env},
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_bad_environment_exits_with_message_not_traceback(tmp_path: Path) -> None:
+    result = _run_script("serve", MEDIA_ROOT=str(tmp_path / "missing"), MEDIA_PASSWORD="x")
     assert result.returncode == 2
-    assert "MEDIA_ROOT is not set" in result.stderr
-    assert "Traceback" not in result.stderr
+    assert "does not exist" in result.stderr and "Traceback" not in result.stderr
+
+
+def test_first_run_without_a_terminal_explains_itself() -> None:
+    result = _run_script()  # no config.json next to main.py: setup starts, stdin is closed
+    assert result.returncode == 1
+    assert "Setup needs answers" in result.stdout and "Traceback" not in result.stdout + result.stderr
 
 
 def test_secret_key_is_generated_once_and_persisted(tmp_path: Path) -> None:
@@ -155,7 +180,7 @@ def test_password_is_compared_as_fixed_length_digests(monkeypatch: pytest.Monkey
     seen = []
     real = main.hmac.compare_digest
     monkeypatch.setattr(main.hmac, "compare_digest", lambda a, b: seen.append((len(a), len(b))) or real(a, b))
-    checker = main.PasswordChecker("secret")
+    checker = main.PasswordChecker(main.hash_password("secret", iterations=1_000))
     assert checker.verify("secret") and not checker.verify("secre") and not checker.verify("secret" * 100)
     assert seen == [(32, 32)] * 3
 
@@ -461,3 +486,214 @@ def test_video_thumbnail_with_ffmpeg(settings: main.Settings, tmp_path: Path) ->
     assert response.headers["content-type"] == "image/jpeg"
     with Image.open(io.BytesIO(response.content)) as im:
         assert im.size == (480, 270)
+
+
+# --------------------------------------------------------------------------- one-command deployment
+
+
+def test_cookie_is_secure_only_over_https(settings: main.Settings) -> None:
+    for base_url, secure in (("https://testserver", True), ("http://testserver", False)):
+        client = TestClient(main.create_app(settings), base_url=base_url, follow_redirects=False)
+        response = client.post("/login", data={"password": PASSWORD})
+        assert ("secure" in response.headers["set-cookie"].lower()) is secure
+        assert client.get("/").status_code == 200  # the browser can send it back
+
+
+def test_parallel_guesses_cannot_outrun_the_lockout(settings: main.Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    checked: list[str] = []
+    real_verify = main.PasswordChecker.verify
+
+    def slow_verify(self: main.PasswordChecker, candidate: str) -> bool:
+        checked.append(candidate)
+        time.sleep(0.05)  # widen the window a race would need
+        return real_verify(self, candidate)
+
+    monkeypatch.setattr(main.PasswordChecker, "verify", slow_verify)
+    app = main.create_app(settings)
+
+    async def attack() -> list[int]:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://testserver") as client:
+            replies = await asyncio.gather(*(client.post("/login", data={"password": f"guess {i}"}) for i in range(20)))
+        return [reply.status_code for reply in replies]
+
+    statuses = anyio.run(attack)
+    assert len(checked) == 5
+    assert statuses.count(401) == 4 and statuses.count(429) == 16
+
+
+def test_config_file_round_trip_and_login(tmp_path: Path, media: Path) -> None:
+    site = main.SiteConfig(str(media), main.hash_password(PASSWORD, iterations=1_000), 8443, domain="media.example.com")
+    site.save(tmp_path / "config.json")
+    assert (tmp_path / "config.json").stat().st_mode & 0o777 == 0o600
+    assert PASSWORD not in (tmp_path / "config.json").read_text()
+    assert main.SiteConfig.load(tmp_path / "config.json") == site
+    settings = main.Settings.from_env({}, app_dir=tmp_path)  # no MEDIA_* variables: config.json is used
+    assert settings.media_root == media.resolve() and settings.password_hash == site.password_hash
+    client = TestClient(main.create_app(settings), base_url="https://testserver", follow_redirects=False)
+    assert client.post("/login", data={"password": "wrong password"}).status_code == 401
+    assert client.post("/login", data={"password": PASSWORD}).status_code == 303
+
+
+def test_damaged_config_is_reported(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("{not json")
+    with pytest.raises(main.ConfigError, match="damaged"):
+        main.SiteConfig.load(tmp_path / "config.json")
+
+
+@pytest.mark.parametrize(
+    "options, url",
+    [
+        ({"domain": "m.example.com", "port": 443}, "https://m.example.com"),
+        ({"domain": "m.example.com", "port": 8443}, "https://m.example.com:8443"),
+        ({"host": "203.0.113.7", "port": 80}, "http://203.0.113.7"),
+        ({"host": "203.0.113.7", "port": 8000}, "http://203.0.113.7:8000"),
+        ({"host": "2001:db8::7", "port": 8000}, "http://[2001:db8::7]:8000"),
+    ],
+)
+def test_public_url(options: dict, url: str) -> None:
+    assert main.SiteConfig("/media", "hash", **options).public_url() == url
+
+
+@pytest.mark.parametrize(
+    "typed, domain",
+    [
+        ("https://Media.Example.com/some/path", "media.example.com"),
+        ("media.example.com.", "media.example.com"),
+        ("example.com:443", "example.com"),
+        ("\u0645\u062b\u0627\u0644.\u0627\u06cc\u0631\u0627\u0646", "xn--mgbh0fb.xn--mgba3a4f16a"),  # a Persian IDN
+    ],
+)
+def test_domains_are_cleaned_up(typed: str, domain: str) -> None:
+    assert main.normalize_domain(typed) == domain
+
+
+@pytest.mark.parametrize("typed", ["localhost", "203.0.113.7", "bad_name.com", "-x.example.com", "a..b", "exa mple.com"])
+def test_bad_domains_are_refused(typed: str) -> None:
+    with pytest.raises(ValueError):
+        main.normalize_domain(typed)
+
+
+def test_port_checks() -> None:
+    for answer in ("http", "0", "70000"):
+        with pytest.raises(ValueError, match="1 to 65535"):
+            main.check_port(answer, tls=False)
+    with pytest.raises(ValueError, match="Let's Encrypt"):
+        main.check_port("80", tls=True)
+    busy = main.listen_socket("", 0)
+    try:
+        with pytest.raises(ValueError, match="already used"):
+            main.check_port(str(busy.getsockname()[1]), tls=False)
+    finally:
+        busy.close()
+    free = main.listen_socket("", 0)
+    port = free.getsockname()[1]
+    free.close()
+    assert main.check_port(str(port), tls=False) == str(port)
+
+
+def test_port_80_helper_answers_challenges_and_redirects(tmp_path: Path) -> None:
+    challenges = tmp_path / ".well-known" / "acme-challenge"
+    challenges.mkdir(parents=True)
+    (challenges / "tok-EN_1").write_text("tok-EN_1.thumbprint")
+    (tmp_path / "secret.txt").write_text("private")
+    with main.PortEightyHelper("https://media.example.com:8443", port=0, webroot=tmp_path) as helper, httpx.Client(
+        trust_env=False, follow_redirects=False
+    ) as http:
+        hosts = ["127.0.0.1"] + (["[::1]"] if socket.has_dualstack_ipv6() else [])
+        for host in hosts:
+            base = f"http://{host}:{helper.port}"
+            assert http.get(f"{base}/.well-known/acme-challenge/tok-EN_1").text == "tok-EN_1.thumbprint"
+            assert http.get(f"{base}/.well-known/acme-challenge/missing").status_code == 404
+            assert http.get(f"{base}/.well-known/acme-challenge/..%2Fsecret.txt").status_code == 404
+            moved = http.get(f"{base}/browse/Movies?page=2")
+            assert moved.status_code == 301
+            assert moved.headers["location"] == "https://media.example.com:8443/browse/Movies?page=2"
+
+
+def test_service_unit_quotes_paths() -> None:
+    unit = main.service_unit("/opt/my media/.venv/bin/python", Path("/opt/my media/main.py"))
+    assert 'ExecStart="/opt/my media/.venv/bin/python" "/opt/my media/main.py" serve' in unit
+    assert "ExecReload=/bin/kill -HUP $MAINPID" in unit and "ProtectSystem=full" in unit
+    assert '"/srv/100%%/main.py"' in main.service_unit("/usr/bin/python3", Path("/srv/100%/main.py"))
+
+
+def test_certbot_commands_keep_state_next_to_the_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(main, "CERTBOT_DIR", tmp_path / ".certbot")
+    monkeypatch.setattr(main, "ACME_WEBROOT", tmp_path / ".certbot" / "webroot")
+    command = main.certonly_command(main.SiteConfig("/m", "h", 443, domain="media.example.com"))
+    assert command[1] == "certonly" and "--register-unsafely-without-email" in command
+    assert command[command.index("-w") + 1] == str(tmp_path / ".certbot" / "webroot")
+    assert command[command.index("--config-dir") + 1] == str(tmp_path / ".certbot" / "config")
+    assert command[command.index("-d") + 1] == "media.example.com"
+    staging = main.SiteConfig("/m", "h", 443, domain="d.example.com", email="me@example.com", acme_server=main.LETSENCRYPT_STAGING)
+    command = main.certonly_command(staging)
+    assert command[command.index("-m") + 1] == "me@example.com"
+    assert command[command.index("--server") + 1] == main.LETSENCRYPT_STAGING
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses a shell script as a stand-in for certbot")
+def test_renew_reports_whether_the_certificate_changed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(main, "CERTBOT_DIR", tmp_path)
+    cert, _ = main.certificate_files("d.example.com")
+    cert.parent.mkdir(parents=True)
+    cert.write_text("old")
+    fake = tmp_path / "certbot"
+    fake.write_text(f'#!/bin/sh\n[ -n "$RENEW" ] && echo new > "{cert}"\nexit 0\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(main, "certbot_path", lambda: fake)
+    site = main.SiteConfig("/m", "h", 443, domain="d.example.com")
+    assert main.renew_certificate(site) is False
+    monkeypatch.setenv("RENEW", "1")
+    assert main.renew_certificate(site) is True
+    fake.write_text("#!/bin/sh\necho 'Challenge failed for d.example.com' >&2\nexit 1\n")
+    with pytest.raises(main.SetupError, match="Challenge failed"):
+        main.renew_certificate(site)
+
+
+@pytest.mark.skipif(not shutil.which("openssl") or not hasattr(signal, "SIGHUP"), reason="needs openssl and SIGHUP")
+def test_https_server_reloads_its_certificate_on_sighup(settings: main.Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main, "CERTBOT_DIR", tmp_path / "certbot")
+    cert, key = main.certificate_files("media.example.com")
+    cert.parent.mkdir(parents=True)
+
+    def issue(name: str) -> bytes:
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1",
+             "-subj", f"/CN={name}", "-keyout", str(key), "-out", str(cert)],
+            check=True, capture_output=True,
+        )  # fmt: skip
+        return ssl.PEM_cert_to_DER_cert(cert.read_text())
+
+    def served() -> bytes:
+        context = ssl.create_default_context()
+        context.check_hostname, context.verify_mode = False, ssl.CERT_NONE
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as raw, context.wrap_socket(raw) as tls:
+            return tls.getpeercert(binary_form=True)
+
+    first = issue("first")
+    sock = main.listen_socket("127.0.0.1", 0)
+    port = sock.getsockname()[1]
+    site = main.SiteConfig(str(settings.media_root), settings.password_hash, port, domain="media.example.com", host="127.0.0.1")
+    config = uvicorn.Config(main.create_app(settings), ssl_certfile=str(cert), ssl_keyfile=str(key), log_level="warning")
+    server = main.MediaServer(config, site)
+    seen: list[bytes] = []
+
+    def visit() -> None:
+        try:
+            assert main.wait_until_listening(port, "127.0.0.1", seconds=10)
+            seen.append(served())
+            seen.append(issue("second"))
+            os.kill(os.getpid(), signal.SIGHUP)  # what `systemctl reload` sends
+            time.sleep(0.5)
+            seen.append(served())
+        finally:
+            server.should_exit = True
+
+    threading.Thread(target=visit).start()
+    server.run(sockets=[sock])
+    assert seen[0] == first and seen[2] == seen[1] != first
+
+
+def test_domain_must_resolve() -> None:
+    with pytest.raises(ValueError, match="does not resolve"):
+        main.check_domain("nothing.invalid")  # .invalid never resolves (RFC 2606)

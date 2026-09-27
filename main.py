@@ -1,54 +1,196 @@
 #!/usr/bin/env python3
 """Personal media library server in a single file.
 
-Serves the videos, images and audio files below ``MEDIA_ROOT`` to a browser,
-behind one shared password::
+Run it and answer a few questions::
 
-    MEDIA_ROOT=/srv/media MEDIA_PASSWORD='a long passphrase' python main.py
+    sudo python3 main.py
 
-README.md lists every environment variable and has an nginx example.
+The first run installs everything it needs (into .venv next to this file),
+asks for your media folder, a password, the port, and whether to get a free
+Let's Encrypt HTTPS certificate for your domain, then starts the server, as a
+systemd service when it can. Later runs start it with the same answers.
+
+    python3 main.py setup      change the answers
+    python3 main.py serve      start without any questions (what the service runs)
+    python3 main.py renew      renew the HTTPS certificate now
+    python3 main.py uninstall  remove the systemd service
+
+It can also be configured with environment variables and run behind your own
+reverse proxy (``uvicorn main:app``); README.md has the details.
 """
 
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 10):  # checked before anything that needs a newer Python
+    sys.exit("This program needs Python 3.10 or newer (found %d.%d)." % sys.version_info[:2])
+
+import argparse
 import asyncio
 import base64
 import contextlib
+import functools
+import getpass
 import hashlib
 import hmac
 import html
+import importlib.util
 import ipaddress
+import json
 import logging
 import math
 import os
 import re
 import secrets
 import shutil
+import signal
+import socket
+import socketserver
+import ssl
 import stat
 import subprocess
-import sys
 import tempfile
 import threading
 import time
+import urllib.request
 from collections import Counter, deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import timezone
 from email.utils import formatdate, parsedate_to_datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence, Union
 from urllib.parse import parse_qs, quote, urlsplit
 
-import anyio
-import uvicorn
-from fastapi import FastAPI, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
-from itsdangerous import BadData, URLSafeTimedSerializer
-from PIL import Image, ImageOps
-from starlette.concurrency import run_in_threadpool
-from starlette.datastructures import Headers
-from starlette.exceptions import HTTPException
-from starlette.requests import HTTPConnection
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
+APP_DIR = Path(__file__).resolve().parent
+SCRIPT = Path(__file__).resolve()
+VENV_DIR = APP_DIR / ".venv"
+REQUIREMENTS = {  # import name -> pip requirement
+    "fastapi": "fastapi>=0.115",
+    "uvicorn": "uvicorn[standard]>=0.30",
+    "itsdangerous": "itsdangerous>=2.1",
+    "PIL": "Pillow>=11.3",
+}
+CERTBOT_REQUIREMENT = "certbot>=2.0"
+
+
+# --------------------------------------------------------------------------
+# Bootstrap. Standard library only: this runs before the web stack exists.
+# --------------------------------------------------------------------------
+
+_COLORS = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33"}
+
+
+def say(message: str = "", color: str = "") -> None:
+    """Print a line for the person running the command, coloured on terminals."""
+    if color and sys.stdout.isatty() and "NO_COLOR" not in os.environ:
+        message = f"\033[{_COLORS[color]}m{message}\033[0m"
+    print(message, flush=True)
+
+
+def is_root() -> bool:
+    """True when running as root (needed for ports below 1024, apt and systemd)."""
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+_PACKAGE_MANAGERS = (  # (tool, install command, command that refreshes its index first)
+    ("apt-get", ["apt-get", "install", "-y", "-q"], ["apt-get", "update", "-q"]),
+    ("dnf", ["dnf", "install", "-y", "-q"], None),
+    ("yum", ["yum", "install", "-y", "-q"], None),
+    ("zypper", ["zypper", "--non-interactive", "install"], None),
+    ("pacman", ["pacman", "-S", "--noconfirm", "--needed"], ["pacman", "-Sy"]),
+    ("apk", ["apk", "add"], None),
+)
+
+
+@functools.lru_cache(maxsize=None)
+def _refresh_package_index(command: tuple[str, ...]) -> None:
+    subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+def install_system_package(*names: str) -> bool:
+    """Install the first of names the system package manager has. Needs root."""
+    if not is_root():
+        return False
+    env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+    for tool, install, refresh in _PACKAGE_MANAGERS:
+        if shutil.which(tool) is None:
+            continue
+        if refresh:
+            _refresh_package_index(tuple(refresh))
+        for name in names:
+            if subprocess.run([*install, name], env=env, capture_output=True, check=False).returncode == 0:
+                return True
+        return False
+    return False
+
+
+def venv_python() -> Path:
+    """The interpreter inside .venv."""
+    return VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def create_venv() -> bool:
+    """Create .venv, first installing Debian/Ubuntu's python3-venv if it is missing."""
+    say("Preparing a private Python environment in .venv (first run only)...")
+    version = "%d.%d" % sys.version_info[:2]
+    for attempt in range(2):
+        made = subprocess.run(
+            [sys.executable, "-m", "venv", "--clear", str(VENV_DIR)], capture_output=True, text=True, check=False
+        )
+        if made.returncode == 0 and venv_python().exists():
+            return True
+        shutil.rmtree(VENV_DIR, ignore_errors=True)
+        if attempt == 0 and not install_system_package(f"python{version}-venv", "python3-venv"):
+            break
+    say(f"Could not create {VENV_DIR}:\n{(made.stderr or made.stdout).strip()}", "red")
+    return False
+
+
+def pip_install(*requirements: str) -> None:
+    """Install packages into the running interpreter (our .venv)."""
+    names = ", ".join(re.split(r"[<>=\[]", req)[0] for req in requirements)
+    say(f"Installing {names} (first run only, about a minute)...")
+    command = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--quiet", *requirements]
+    if subprocess.run(command, check=False).returncode != 0:
+        sys.exit("Installing Python packages failed; pip's output above says why.")
+
+
+def bootstrap() -> None:
+    """Make the web stack importable before the rest of this file imports it.
+
+    Packages go into .venv next to this file, never into the system Python:
+    unless we already run from .venv, create it and re-run this script with
+    its interpreter. MEDIA_NO_VENV=1 uses the current interpreter instead.
+    """
+    missing = [req for module, req in REQUIREMENTS.items() if importlib.util.find_spec(module) is None]
+    in_venv = Path(sys.prefix).resolve() == VENV_DIR.resolve()
+    if in_venv or os.environ.get("MEDIA_NO_VENV") == "1":
+        if missing:
+            pip_install(*missing)
+        return
+    if venv_python().exists() or create_venv():
+        os.execv(venv_python(), [str(venv_python()), str(SCRIPT), *sys.argv[1:]])
+    if missing:
+        sys.exit(f"Could not install the Python packages. Install them yourself: pip install {' '.join(missing)}")
+
+
+if __name__ == "__main__":
+    bootstrap()
+
+# The rest of the file needs the packages bootstrap() installs.
+import anyio  # noqa: E402
+import uvicorn  # noqa: E402
+from fastapi import FastAPI, Query, Request  # noqa: E402
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response  # noqa: E402
+from itsdangerous import BadData, URLSafeTimedSerializer  # noqa: E402
+from PIL import Image, ImageOps  # noqa: E402
+from starlette.concurrency import run_in_threadpool  # noqa: E402
+from starlette.datastructures import Headers  # noqa: E402
+from starlette.exceptions import HTTPException  # noqa: E402
+from starlette.requests import HTTPConnection  # noqa: E402
+from starlette.types import ASGIApp, Message, Receive, Scope, Send  # noqa: E402
 
 log = logging.getLogger("media")
 
@@ -56,7 +198,14 @@ log = logging.getLogger("media")
 # Constants
 # --------------------------------------------------------------------------
 
-APP_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = APP_DIR / "config.json"
+CERTBOT_DIR = APP_DIR / ".certbot"
+ACME_WEBROOT = CERTBOT_DIR / "webroot"
+SERVICE_NAME = "media-library"
+SERVICE_FILE = Path("/etc/systemd/system") / f"{SERVICE_NAME}.service"
+LETSENCRYPT_STAGING = "https://acme-staging-v02.api.letsencrypt.org/directory"
+PBKDF2_ITERATIONS = 600_000  # OWASP's 2023 recommendation for PBKDF2-HMAC-SHA256
+CERT_RENEW_INTERVAL = 12 * 60 * 60  # seconds between `certbot renew` runs
 
 VIDEO_TYPES = {
     ".mp4": "video/mp4",
@@ -149,33 +298,49 @@ def plural(count: int, noun: str) -> str:
 
 
 class ConfigError(Exception):
-    """The environment does not describe a server that can start."""
+    """The environment or config.json does not describe a server that can start."""
 
 
 @dataclass(frozen=True)
 class Settings:
-    """Runtime configuration, normally built from the environment by ``from_env``."""
+    """What the web app needs, from environment variables or from config.json."""
 
     media_root: Path
-    password: str
     secret_key: str
+    password: str = ""  # MEDIA_PASSWORD in plain text, or...
+    password_hash: str = ""  # ...a hash_password() result from config.json
     thumb_dir: Path = APP_DIR / ".thumbs"
     ffmpeg: str | None = None
     ffprobe: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None, app_dir: Path = APP_DIR) -> Settings:
-        """Read and validate the environment, reporting every problem at once."""
-        env = os.environ if environ is None else environ
-        problems: list[str] = []
+        """Use MEDIA_ROOT and MEDIA_PASSWORD when either is set, else config.json.
 
-        media_root: Path | None = None
+        Every problem is reported at once.
+        """
+        env = os.environ if environ is None else environ
+        secret_key = functools.partial(load_secret_key, env.get("SECRET_KEY", ""), app_dir / ".secret_key")
+        tools = {"ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe")}
+
+        if "MEDIA_ROOT" not in env and "MEDIA_PASSWORD" not in env:
+            site = SiteConfig.load(app_dir / "config.json")
+            if site is None:
+                raise ConfigError(
+                    "Not set up yet. Run `python3 main.py` in a terminal and answer the questions, "
+                    "or set MEDIA_ROOT and MEDIA_PASSWORD."
+                )
+            media_root = check_media_root(site.media_root, label="The media folder")
+            return cls(media_root, secret_key(), password_hash=site.password_hash, thumb_dir=app_dir / ".thumbs", **tools)
+
+        problems: list[str] = []
+        root: Path | None = None
         raw_root = env.get("MEDIA_ROOT", "").strip()
         if not raw_root:
             problems.append("MEDIA_ROOT is not set. Point it at the folder to serve, e.g. MEDIA_ROOT=/srv/media")
         else:
             try:
-                media_root = check_media_root(raw_root)
+                root = check_media_root(raw_root)
             except ConfigError as exc:
                 problems.append(str(exc))
 
@@ -185,30 +350,74 @@ class Settings:
 
         if problems:
             raise ConfigError("\n".join(problems))
-        assert media_root is not None
-
-        return cls(
-            media_root=media_root,
-            password=password,
-            secret_key=load_secret_key(env.get("SECRET_KEY", ""), app_dir / ".secret_key"),
-            thumb_dir=app_dir / ".thumbs",
-            ffmpeg=shutil.which("ffmpeg"),
-            ffprobe=shutil.which("ffprobe"),
-        )
+        assert root is not None
+        return cls(root, secret_key(), password=password, thumb_dir=app_dir / ".thumbs", **tools)
 
 
-def check_media_root(raw: str) -> Path:
-    """Resolve MEDIA_ROOT and check that it is a readable directory."""
+@dataclass
+class SiteConfig:
+    """The setup answers, kept in config.json next to this file (owner-only)."""
+
+    media_root: str
+    password_hash: str
+    port: int
+    domain: str = ""  # when set: HTTPS with a Let's Encrypt certificate for it
+    email: str = ""  # optional contact address for the Let's Encrypt account
+    acme_server: str = ""  # empty means Let's Encrypt itself
+    host: str = ""  # address to listen on; empty means every IPv4 and IPv6 address
+
+    def __post_init__(self) -> None:
+        self.port = int(self.port)
+
+    @property
+    def tls(self) -> bool:
+        """True when the site is served over HTTPS."""
+        return bool(self.domain)
+
+    @classmethod
+    def load(cls, path: Path = CONFIG_FILE) -> SiteConfig | None:
+        """Read config.json; None when setup has not been run yet."""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return cls(**{f.name: data[f.name] for f in fields(cls) if f.name in data})
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            raise ConfigError(f"{path} belongs to another user; run this with sudo.") from None
+        except (OSError, ValueError, TypeError) as exc:
+            raise ConfigError(f"{path} is damaged ({exc}). Run `python3 main.py setup` to write it again.") from None
+
+    def save(self, path: Path = CONFIG_FILE) -> None:
+        """Write config.json atomically, readable by its owner only (it holds the password hash)."""
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.unlink(missing_ok=True)
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as fh:
+            json.dump(asdict(self), fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+
+    def public_url(self) -> str:
+        """The address people open in their browser."""
+        if self.tls:
+            return f"https://{self.domain}" + ("" if self.port == 443 else f":{self.port}")
+        host = self.host or guess_server_ip()
+        if ":" in host:
+            host = f"[{host}]"
+        return f"http://{host}" + ("" if self.port == 80 else f":{self.port}")
+
+
+def check_media_root(raw: str, label: str = "MEDIA_ROOT") -> Path:
+    """Resolve the media folder and check that it is a readable directory."""
     try:
         root = Path(raw).expanduser().resolve(strict=True)
     except FileNotFoundError:
-        raise ConfigError(f"MEDIA_ROOT={raw} does not exist.") from None
+        raise ConfigError(f"{label} ({raw}) does not exist.") from None
     except (OSError, RuntimeError) as exc:
-        raise ConfigError(f"MEDIA_ROOT={raw} cannot be opened: {exc}") from None
+        raise ConfigError(f"{label} ({raw}) cannot be opened: {exc}") from None
     if not root.is_dir():
-        raise ConfigError(f"MEDIA_ROOT={raw} is not a directory.")
+        raise ConfigError(f"{label} ({raw}) is not a directory.")
     if not os.access(root, os.R_OK | os.X_OK):
-        raise ConfigError(f"MEDIA_ROOT={raw} is not readable by this user.")
+        raise ConfigError(f"{label} ({raw}) is not readable by this user.")
     return root
 
 
@@ -255,25 +464,37 @@ def load_settings_or_exit() -> Settings:
 # --------------------------------------------------------------------------
 
 
-class PasswordChecker:
-    """Timing-safe password verification.
+def hash_password(password: str, iterations: int = PBKDF2_ITERATIONS) -> str:
+    """Salted PBKDF2-SHA256 hash, stored as ``pbkdf2_sha256$iterations$salt$digest``."""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8", "surrogateescape"), salt, iterations)
+    return "$".join(["pbkdf2_sha256", str(iterations), base64.b64encode(salt).decode(), base64.b64encode(digest).decode()])
 
-    Both the configured and the submitted password are reduced to fixed-length
-    HMAC digests before ``hmac.compare_digest`` sees them, so the comparison
-    time reveals neither the password's contents nor its length.
+
+class PasswordChecker:
+    """Timing-safe password verification against a salted PBKDF2 hash.
+
+    The submitted password goes through the same PBKDF2 as the stored one,
+    and ``hmac.compare_digest`` compares the two fixed-length digests, so the
+    time taken reveals neither the password nor its length. PBKDF2 is slow
+    on purpose (~0.4 s): call ``verify`` from a worker thread.
     """
 
-    def __init__(self, password: str) -> None:
-        self._key = secrets.token_bytes(32)
-        self._expected = self._digest(password)
-
-    def _digest(self, candidate: str) -> bytes:
-        data = candidate.encode("utf-8", "surrogateescape")
-        return hmac.new(self._key, data, hashlib.sha256).digest()
+    def __init__(self, password_hash: str) -> None:
+        try:
+            scheme, iterations, salt, digest = password_hash.split("$")
+            if scheme != "pbkdf2_sha256":
+                raise ValueError(scheme)
+            self._iterations = int(iterations)
+            self._salt = base64.b64decode(salt, validate=True)
+            self._digest = base64.b64decode(digest, validate=True)
+        except ValueError:
+            raise ConfigError("The saved password hash is damaged. Run `python3 main.py setup` to set the password again.") from None
 
     def verify(self, candidate: str) -> bool:
-        """True if candidate is the configured password."""
-        return hmac.compare_digest(self._digest(candidate), self._expected)
+        """True if candidate is the password."""
+        attempt = hashlib.pbkdf2_hmac("sha256", candidate.encode("utf-8", "surrogateescape"), self._salt, self._iterations)
+        return hmac.compare_digest(attempt, self._digest)
 
 
 class LoginRateLimiter:
@@ -361,10 +582,10 @@ def client_key(host: str | None) -> str:
 class SessionManager:
     """Stateless sessions: an itsdangerous-signed, timestamped cookie value."""
 
-    def __init__(self, secret_key: str, password: str, max_age: int = SESSION_MAX_AGE) -> None:
-        # The password is folded into the signing salt, so changing
-        # MEDIA_PASSWORD invalidates every existing session.
-        fingerprint = hashlib.sha256(password.encode("utf-8", "surrogateescape")).hexdigest()
+    def __init__(self, secret_key: str, credential: str, max_age: int = SESSION_MAX_AGE) -> None:
+        # The password (or its stored hash) is folded into the signing salt,
+        # so changing the password invalidates every existing session.
+        fingerprint = hashlib.sha256(credential.encode("utf-8", "surrogateescape")).hexdigest()
         self._serializer = URLSafeTimedSerializer(secret_key, salt=f"media-session:{fingerprint}")
         self.max_age = max_age
 
@@ -1913,8 +2134,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings_or_exit()
     library = MediaLibrary(settings.media_root)
     thumbs = ThumbnailService(settings.thumb_dir, settings.ffmpeg, settings.ffprobe)
-    sessions = SessionManager(settings.secret_key, settings.password)
-    passwords = PasswordChecker(settings.password)
+    credential = settings.password_hash or settings.password
+    sessions = SessionManager(settings.secret_key, credential)
+    passwords = PasswordChecker(settings.password_hash or hash_password(settings.password))
     limiter = LoginRateLimiter()
 
     app = FastAPI(title="Media Library", docs_url=None, redoc_url=None, openapi_url=None)
@@ -1948,8 +2170,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         wait = limiter.retry_after(client)
         if wait:
             return login_page(target, status_code=429, locked_for=wait)
-        if not passwords.verify(form.get("password", "")):
-            left = limiter.record_failure(client)
+        # Count the attempt before the slow check runs in a worker thread, so
+        # parallel guesses cannot all get in ahead of the lockout.
+        left = limiter.record_failure(client)
+        if not await run_in_threadpool(passwords.verify, form.get("password", "")):
             if left == 0:
                 log.warning("Locked out %s for %d minutes after %d failed logins", client, LOGIN_LOCKOUT_SECONDS // 60, LOGIN_MAX_FAILURES)
                 return login_page(target, status_code=429, locked_for=LOGIN_LOCKOUT_SECONDS)
@@ -1965,16 +2189,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_age=SESSION_MAX_AGE,
             expires=SESSION_MAX_AGE,
             path="/",
-            secure=True,
+            # Secure whenever the site is reached over HTTPS (directly or via a
+            # proxy's X-Forwarded-Proto). Over plain HTTP the browser would
+            # drop a Secure cookie and nobody could ever log in.
+            secure=request.url.scheme == "https",
             httponly=True,
             samesite="lax",
         )
         return response
 
     @app.api_route("/logout", methods=["GET", "POST"])
-    def logout() -> Response:
+    def logout(request: Request) -> Response:
         response = RedirectResponse("/login", status_code=303)
-        response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
+        secure = request.url.scheme == "https"
+        response.delete_cookie(SESSION_COOKIE, path="/", secure=secure, httponly=True, samesite="lax")
         return response
 
     @app.get("/")
@@ -2067,36 +2295,789 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 # --------------------------------------------------------------------------
+# Deployment: HTTPS certificates, the port-80 helper, systemd, setup questions
+# --------------------------------------------------------------------------
+
+
+class SetupError(Exception):
+    """A problem the person running the command has to fix; the message says how."""
+
+
+_TICK = "✓" if "utf" in (sys.stdout.encoding or "").lower() else "*"
+
+
+def done(message: str) -> None:
+    """Report a finished step."""
+    say(f"  {_TICK} {message}", "green")
+
+
+def own_addresses(*families: socket.AddressFamily) -> set[str]:
+    """This machine's source addresses on its default routes (nothing is sent)."""
+    targets = {socket.AF_INET: "192.0.2.1", socket.AF_INET6: "2001:db8::1"}  # documentation ranges
+    found = set()
+    for family in families or tuple(targets):
+        with contextlib.suppress(OSError), socket.socket(family, socket.SOCK_DGRAM) as probe:
+            probe.connect((targets[family], 9))
+            found.add(probe.getsockname()[0])
+    return found
+
+
+def guess_server_ip() -> str:
+    """An IPv4 address to show in the URL of a site without a domain."""
+    return min(own_addresses(socket.AF_INET), default="localhost")
+
+
+def listen_socket(host: str, port: int) -> socket.socket:
+    """A listening TCP socket. host "" means every IPv4 and IPv6 address."""
+    if not host and socket.has_dualstack_ipv6():
+        return socket.create_server(("::", port), family=socket.AF_INET6, dualstack_ipv6=True)
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    return socket.create_server((host or "0.0.0.0", port), family=family)
+
+
+def port_is_free(port: int, host: str = "") -> bool:
+    """True if this process could listen on port right now."""
+    try:
+        listen_socket(host, port).close()
+    except OSError:
+        return False
+    return True
+
+
+def wait_until_listening(port: int, host: str = "", seconds: float = 20) -> bool:
+    """True once something accepts connections on port (on this machine)."""
+    hosts = [host] if host else ["127.0.0.1", "::1"]
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        for address in hosts:
+            with contextlib.suppress(OSError), socket.create_connection((address, port), timeout=1):
+                return True
+        time.sleep(0.5)
+    return False
+
+
+_ACME_PATH = "/.well-known/acme-challenge/"
+_ACME_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,256}")
+
+
+class _DualStackHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer on every IPv4 and IPv6 address.
+
+    IPv6 matters: when a domain has an AAAA record, Let's Encrypt validates
+    over IPv6 first.
+    """
+
+    daemon_threads = True
+    allow_reuse_port = False  # exclusive: a second listener on port 80 must fail, not share it
+
+    def __init__(self, port: int, handler: type[BaseHTTPRequestHandler]) -> None:
+        dual = socket.has_dualstack_ipv6()
+        self.address_family = socket.AF_INET6 if dual else socket.AF_INET
+        super().__init__(("::" if dual else "0.0.0.0", port), handler, bind_and_activate=False)
+        try:
+            if dual:
+                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            self.server_bind()
+            self.server_activate()
+        except OSError:
+            self.server_close()
+            raise
+
+    def server_bind(self) -> None:
+        # Skip HTTPServer.server_bind's reverse-DNS lookup of the listen address.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "media-library", self.server_address[1]
+
+
+def _port_80_handler(webroot: Path, redirect_to: str | None) -> type[BaseHTTPRequestHandler]:
+    challenges = webroot / ".well-known" / "acme-challenge"
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "media-library"
+        sys_version = ""
+        timeout = 15  # seconds a client gets to send its request
+
+        def do_GET(self) -> None:  # noqa: N802 (http.server's naming)
+            self.answer(with_body=True)
+
+        def do_HEAD(self) -> None:  # noqa: N802
+            self.answer(with_body=False)
+
+        def answer(self, with_body: bool) -> None:
+            path = self.path.split("?", 1)[0]
+            if path.startswith(_ACME_PATH):
+                token = path[len(_ACME_PATH) :]
+                file = challenges / token
+                if _ACME_TOKEN.fullmatch(token) and file.is_file():
+                    self.reply(200, file.read_bytes(), with_body)
+                else:
+                    self.reply(404, b"Not found\n", with_body)
+            elif redirect_to:
+                self.reply(301, b"", with_body, location=redirect_to + (self.path if self.path.startswith("/") else "/"))
+            else:
+                self.reply(404, b"Not found\n", with_body)
+
+        def reply(self, status: int, content: bytes, with_body: bool, location: str | None = None) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            if location:
+                self.send_header("Location", location)
+            self.end_headers()
+            if with_body:
+                self.wfile.write(content)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (http.server's name)
+            log.debug("port 80: %s %s", self.address_string(), format % args)
+
+    return Handler
+
+
+class PortEightyHelper:
+    """Plain-HTTP helper on port 80 for an HTTPS site.
+
+    Serves the Let's Encrypt HTTP-01 challenge files that certbot writes into
+    ACME_WEBROOT, so certificates can be issued and renewed while the site
+    runs, and redirects every other request to the HTTPS address.
+    """
+
+    def __init__(self, redirect_to: str | None, port: int = 80, webroot: Path = ACME_WEBROOT) -> None:
+        self._server = _DualStackHTTPServer(port, _port_80_handler(webroot, redirect_to))  # OSError if taken
+        self.port = self._server.server_address[1]
+        threading.Thread(target=self._server.serve_forever, name="port-80", daemon=True).start()
+
+    def close(self) -> None:
+        """Stop listening."""
+        self._server.shutdown()
+        self._server.server_close()
+
+    def __enter__(self) -> PortEightyHelper:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+def certbot_path() -> Path:
+    """certbot, installed into the same environment as the running Python."""
+    return Path(sys.executable).with_name("certbot.exe" if os.name == "nt" else "certbot")
+
+
+def certificate_files(domain: str) -> tuple[Path, Path]:
+    """(fullchain.pem, privkey.pem) that certbot keeps current for domain."""
+    live = CERTBOT_DIR / "config" / "live" / domain
+    return live / "fullchain.pem", live / "privkey.pem"
+
+
+def certbot_command(action: str, *options: str) -> list[str]:
+    """A certbot command that keeps all of its state in .certbot next to this file."""
+    return [
+        str(certbot_path()),
+        action,
+        "--non-interactive",
+        "--config-dir", str(CERTBOT_DIR / "config"),
+        "--work-dir", str(CERTBOT_DIR / "work"),
+        "--logs-dir", str(CERTBOT_DIR / "logs"),
+        *options,
+    ]  # fmt: skip
+
+
+def certonly_command(site: SiteConfig) -> list[str]:
+    """The certbot command that gets site.domain its certificate (webroot mode)."""
+    options = [
+        "--agree-tos",
+        "--keep-until-expiring",
+        "--webroot", "-w", str(ACME_WEBROOT),
+        "--cert-name", site.domain,
+        "-d", site.domain,
+    ]  # fmt: skip
+    options += ["-m", site.email] if site.email else ["--register-unsafely-without-email"]
+    if site.acme_server:
+        options += ["--server", site.acme_server]
+    return certbot_command("certonly", *options)
+
+
+def _tail(text: str, lines: int = 12) -> str:
+    return "\n".join(f"    {line}" for line in text.strip().splitlines()[-lines:])
+
+
+def _file_digest(path: Path) -> bytes | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).digest()
+    except OSError:
+        return None
+
+
+def certificate_expiry(cert: Path) -> str:
+    """The certificate's expiry date, or "" if it cannot be read."""
+    try:
+        from cryptography import x509  # installed together with certbot
+
+        certificate = x509.load_pem_x509_certificate(cert.read_bytes())
+    except Exception:  # only used for messages
+        return ""
+    expires = getattr(certificate, "not_valid_after_utc", None) or certificate.not_valid_after
+    return expires.strftime("%Y-%m-%d")
+
+
+def resolve(domain: str) -> set[str]:
+    """The addresses domain resolves to (empty if it does not resolve)."""
+    try:
+        return {info[4][0] for info in socket.getaddrinfo(domain, 80, proto=socket.IPPROTO_TCP)}
+    except (socket.gaierror, UnicodeError):
+        return set()
+
+
+def probe_domain(domain: str) -> None:
+    """Fetch a file through http://domain as Let's Encrypt will, and explain a failure."""
+    token = secrets.token_urlsafe(16)
+    probe = ACME_WEBROOT / ".well-known" / "acme-challenge" / token
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_text(token, encoding="utf-8")
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://{domain}{_ACME_PATH}{token}", timeout=10) as response:
+            reachable = response.read().decode("utf-8", "replace") == token
+    except (OSError, ValueError):
+        reachable = False
+    finally:
+        probe.unlink(missing_ok=True)
+    if reachable:
+        done(f"http://{domain} reaches this server")
+        return
+    addresses, mine = resolve(domain), own_addresses()
+    say(f"  Could not reach http://{domain} from this server itself.", "yellow")
+    say(f"  {domain} points to {', '.join(sorted(addresses))}; this server uses {', '.join(sorted(mine)) or '?'}.", "yellow")
+    if any(":" in a for a in addresses) and not any(":" in a for a in mine):
+        say("  The domain has an IPv6 (AAAA) record but this server has no IPv6: delete that record.", "yellow")
+    say("  Trying anyway (some networks cannot loop back to themselves)...", "yellow")
+
+
+PORT_80_BUSY = (
+    "Port 80 is used by another program (a web server such as nginx or apache?). Let's Encrypt "
+    "checks the domain on port 80: stop that program (for example `systemctl stop nginx`), then run setup again."
+)
+
+
+def obtain_certificate(site: SiteConfig) -> None:
+    """Get a certificate for site.domain, answering Let's Encrypt on port 80."""
+    ACME_WEBROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        helper = PortEightyHelper(redirect_to=None)
+    except OSError:
+        raise SetupError(PORT_80_BUSY) from None
+    with helper:
+        probe_domain(site.domain)
+        say(f"  Asking Let's Encrypt for a certificate for {site.domain}...")
+        result = subprocess.run(certonly_command(site), capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise SetupError(
+            f"Let's Encrypt did not issue the certificate:\n{_tail(result.stderr or result.stdout)}\n"
+            "Check that the domain points to this server and that port 80 is open in every firewall, "
+            "including your hosting provider's."
+        )
+
+
+def renew_certificate(site: SiteConfig, force: bool = False, right_away: bool = False) -> bool:
+    """Run `certbot renew` (it renews only when due). True if the certificate changed.
+
+    Unattended, certbot first sleeps a random few minutes so that renewals do
+    not all hit Let's Encrypt at once; right_away skips that for manual runs.
+    """
+    cert, _ = certificate_files(site.domain)
+    before = _file_digest(cert)
+    options = ["--cert-name", site.domain]
+    options += ["--force-renewal"] if force else []
+    options += ["--no-random-sleep-on-renew"] if right_away else []
+    command = certbot_command("renew", *options)
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise SetupError(f"Renewing the certificate failed:\n{_tail(result.stderr or result.stdout)}")
+    return _file_digest(cert) != before
+
+
+class MediaServer(uvicorn.Server):
+    """uvicorn.Server that keeps its Let's Encrypt certificate fresh.
+
+    Twice a day it runs `certbot renew` (which renews only when due) and loads
+    a renewed certificate into the live TLS context: no restart and no dropped
+    connections. SIGHUP (`systemctl reload media-library`) reloads it too.
+    """
+
+    def __init__(self, config: uvicorn.Config, site: SiteConfig) -> None:
+        super().__init__(config)
+        self.site = site
+
+    async def serve(self, sockets: list[socket.socket] | None = None) -> None:
+        upkeep = None
+        if self.site.tls:
+            with contextlib.suppress(AttributeError, NotImplementedError, RuntimeError):  # no SIGHUP on Windows
+                asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, self.reload_certificate)
+            upkeep = asyncio.create_task(self._renew_regularly())
+        try:
+            await super().serve(sockets=sockets)
+        finally:
+            if upkeep:
+                upkeep.cancel()
+
+    def reload_certificate(self) -> None:
+        """Load the certificate files again into the running TLS context."""
+        context = getattr(self.config, "ssl", None)  # set once uvicorn has loaded its config
+        if context is None:
+            return
+        cert, key = certificate_files(self.site.domain)
+        try:
+            context.load_cert_chain(cert, key)
+        except (OSError, ssl.SSLError) as exc:
+            log.error("Could not load the certificate %s: %s", cert, exc)
+        else:
+            log.info("Loaded the certificate for %s (valid until %s)", self.site.domain, certificate_expiry(cert) or "?")
+
+    async def _renew_regularly(self) -> None:
+        await asyncio.sleep(60)  # soon after start, to catch up on renewals missed while stopped
+        while True:
+            try:
+                if await asyncio.to_thread(renew_certificate, self.site):
+                    self.reload_certificate()
+            except (SetupError, OSError) as problem:
+                if "already running" in str(problem):  # a manual `main.py renew` holds certbot's lock
+                    log.info("certbot is busy elsewhere; checking the certificate again later")
+                else:
+                    log.warning("%s", problem)
+            await asyncio.sleep(CERT_RENEW_INTERVAL)
+
+
+def serve(site: SiteConfig | None) -> None:
+    """Run the website in the foreground until Ctrl+C or SIGTERM."""
+    app = create_app()  # validates MEDIA_ROOT/MEDIA_PASSWORD or config.json, exits with a message if wrong
+    options: dict[str, object] = {
+        # Trust X-Forwarded-For/-Proto only from a reverse proxy on this machine,
+        # so the login rate limiter sees real client addresses.
+        "proxy_headers": True,
+        "forwarded_allow_ips": os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1"),
+        "server_header": False,
+    }
+    if site is None:  # environment-variable mode, usually behind a reverse proxy
+        try:
+            port = int(os.environ.get("PORT", "8000"))
+        except ValueError:
+            raise SetupError(f"PORT must be a number, not {os.environ['PORT']!r}") from None
+        uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=port, **options)
+        return
+
+    helper = None
+    if site.tls:
+        cert, key = certificate_files(site.domain)
+        if not cert.exists():
+            raise SetupError(f"There is no certificate for {site.domain} yet. Run: sudo python3 {SCRIPT} setup")
+        options.update(ssl_certfile=str(cert), ssl_keyfile=str(key))
+        try:
+            helper = PortEightyHelper(redirect_to=site.public_url())
+        except OSError:
+            log.warning("Port 80 is taken: HTTP won't redirect to HTTPS and renewals will fail until it is free")
+    try:
+        sock = listen_socket(site.host, site.port)
+    except OSError as exc:
+        if helper:
+            helper.close()
+        raise SetupError(
+            f"Cannot listen on port {site.port} ({exc.strerror}). Is it already running? "
+            f"(systemctl status {SERVICE_NAME})"
+        ) from None
+    server = MediaServer(uvicorn.Config(app, host=site.host or "0.0.0.0", port=site.port, **options), site)
+    log.info("Media Library is at %s", site.public_url())
+    try:
+        server.run(sockets=[sock])
+    finally:
+        if helper:
+            helper.close()
+
+
+def systemd_available() -> bool:
+    """True when systemd runs this machine and we may install services."""
+    return is_root() and shutil.which("systemctl") is not None and Path("/run/systemd/system").is_dir()
+
+
+def systemctl(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run systemctl, capturing its output."""
+    return subprocess.run(["systemctl", *args], capture_output=True, text=True, check=False)
+
+
+def service_active() -> bool:
+    """True if our systemd service is running."""
+    return systemd_available() and systemctl("is-active", "--quiet", SERVICE_NAME).returncode == 0
+
+
+def _unit_quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
+    return f'"{escaped}"'
+
+
+def service_unit(python: str, script: Path) -> str:
+    """The systemd unit that runs `main.py serve`."""
+    return f"""[Unit]
+Description=Media Library
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart={_unit_quote(python)} {_unit_quote(str(script))} serve
+ExecReload=/bin/kill -HUP $MAINPID
+WorkingDirectory={str(script.parent).replace("%", "%%")}
+Restart=on-failure
+RestartSec=5
+# Root is needed for ports 80/443 and to read any media folder, but the
+# service may not modify the system: /usr, /boot and /etc are read-only
+# (except this app's own folder), and it cannot gain privileges, load kernel
+# modules or keep other capabilities.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ReadWritePaths={_unit_quote(str(script.parent))}
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _service_log() -> str:
+    journal = subprocess.run(
+        ["journalctl", "-u", SERVICE_NAME, "-n", "25", "--no-pager"], capture_output=True, text=True, check=False
+    )
+    return _tail(journal.stdout, 25)
+
+
+def start_service(site: SiteConfig, *, restart: bool = False) -> None:
+    """(Re)start the systemd service and wait until the site answers."""
+    systemctl("restart" if restart else "start", SERVICE_NAME)
+    if not wait_until_listening(site.port, site.host):
+        raise SetupError(f"The {SERVICE_NAME} service did not start. Its log:\n{_service_log()}")
+
+
+def install_service(site: SiteConfig) -> None:
+    """Install the systemd service, enable it at boot and (re)start it."""
+    SERVICE_FILE.write_text(service_unit(sys.executable, SCRIPT), encoding="utf-8")
+    systemctl("daemon-reload")
+    systemctl("enable", SERVICE_NAME)
+    start_service(site, restart=True)
+
+
+def uninstall_service() -> None:
+    """Stop and remove the systemd service (files and settings stay)."""
+    if not SERVICE_FILE.exists():
+        say("The service is not installed.")
+        return
+    if not is_root():
+        raise SetupError(f"Removing the service needs root: sudo python3 {SCRIPT} uninstall")
+    systemctl("disable", "--now", SERVICE_NAME)
+    SERVICE_FILE.unlink()
+    systemctl("daemon-reload")
+    done(f"Removed the {SERVICE_NAME} service. Settings, certificates and media in {APP_DIR} are untouched.")
+
+
+def open_firewall(ports: Sequence[int]) -> None:
+    """Allow ports through ufw or firewalld, whichever is active."""
+    if not is_root():
+        return
+    listed = ", ".join(map(str, ports))
+    if shutil.which("ufw") and "Status: active" in subprocess.run(
+        ["ufw", "status"], capture_output=True, text=True, check=False
+    ).stdout:
+        for port in ports:
+            subprocess.run(["ufw", "allow", f"{port}/tcp"], capture_output=True, check=False)
+        done(f"Opened TCP {listed} in the ufw firewall")
+    elif shutil.which("firewall-cmd") and subprocess.run(["firewall-cmd", "--state"], capture_output=True, check=False).returncode == 0:
+        for port in ports:
+            subprocess.run(["firewall-cmd", "--permanent", f"--add-port={port}/tcp"], capture_output=True, check=False)
+        subprocess.run(["firewall-cmd", "--reload"], capture_output=True, check=False)
+        done(f"Opened TCP {listed} in firewalld")
+
+
+def ensure_ffmpeg() -> None:
+    """Install ffmpeg (video thumbnails) if it is missing and we can."""
+    if shutil.which("ffmpeg"):
+        return
+    say("  Installing ffmpeg for video thumbnails (can take a few minutes)...")
+    if install_system_package("ffmpeg", "ffmpeg-free"):
+        done("ffmpeg installed")
+    else:
+        say("  Could not install ffmpeg; videos will show an icon instead of a thumbnail.", "yellow")
+
+
+# Setup questions --------------------------------------------------------------
+
+_YES = {"y", "yes", "آره", "اره", "بله"}  # Persian answers are accepted too
+_NO = {"n", "no", "نه", "خیر"}
+_HOSTNAME = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def ask(question: str, default: str = "", check: Callable[[str], str] | None = None, optional: bool = False) -> str:
+    """Ask until the answer passes check, which returns it cleaned up or raises ValueError."""
+    suffix = f" [{default}]" if default else ""
+    while True:
+        try:
+            answer = input(f"{question}{suffix}: ").strip() or default
+        except EOFError:
+            raise SetupError("Setup needs answers: run it in a terminal.") from None
+        if not answer:
+            if optional:
+                return ""
+            continue
+        try:
+            return check(answer) if check else answer
+        except ValueError as problem:
+            say(f"  {problem}", "yellow")
+
+
+def ask_yes_no(question: str, default: bool) -> bool:
+    """A yes/no question; Enter picks the default."""
+    while True:
+        answer = ask(f"{question} [{'Y/n' if default else 'y/N'}]", optional=True).lower()
+        if not answer:
+            return default
+        if answer in _YES or answer in _NO:
+            return answer in _YES
+        say("  Please answer y or n.", "yellow")
+
+
+def ask_password(current_hash: str) -> str:
+    """Ask for the website password; returns its hash."""
+    read = getpass.getpass if sys.stdin.isatty() else input
+    hint = "Enter keeps the current one" if current_hash else "Enter makes one up"
+    while True:
+        try:
+            first = read(f"Password for the website ({hint}): ")
+            if not first:
+                if current_hash:
+                    return current_hash
+                first = secrets.token_urlsafe(12)
+                say(f"  Your password is: {first}   <- write it down", "bold")
+                return hash_password(first)
+            if len(first) < 8:
+                say("  Use at least 8 characters.", "yellow")
+            elif read("Type it again: ") != first:
+                say("  The two didn't match; try again.", "yellow")
+            else:
+                return hash_password(first)
+        except EOFError:
+            raise SetupError("Setup needs answers: run it in a terminal.") from None
+
+
+def check_media_folder(answer: str) -> str:
+    """The media folder as an absolute path, created on request."""
+    path = Path(answer).expanduser().absolute()
+    if not path.exists():
+        if not ask_yes_no(f"  {path} does not exist. Create it?", True):
+            raise ValueError("Enter the folder your media is in.")
+        try:
+            path.mkdir(parents=True)
+        except OSError as exc:
+            raise ValueError(f"Cannot create {path}: {exc.strerror}") from None
+    if not path.is_dir():
+        raise ValueError(f"{path} is a file, not a folder.")
+    return str(path.resolve())
+
+
+def normalize_domain(answer: str) -> str:
+    """"https://Media.Example.com/" -> "media.example.com"; non-Latin names become punycode."""
+    domain = re.sub(r"^[a-z][a-z0-9+.-]*://", "", answer.strip(), flags=re.IGNORECASE)
+    domain = domain.split("/")[0].split(":")[0].rstrip(".").lower()
+    try:
+        domain = domain.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise ValueError("That is not a valid domain name.") from None
+    try:
+        ipaddress.ip_address(domain)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("Let's Encrypt needs a domain name here, not an IP address.")
+    if not _HOSTNAME.fullmatch(domain):
+        raise ValueError("That is not a valid domain name (for example: media.example.com).")
+    return domain
+
+
+def check_domain(answer: str) -> str:
+    """A domain name that already resolves (Let's Encrypt will look it up)."""
+    domain = normalize_domain(answer)
+    if not resolve(domain):
+        raise ValueError(
+            f"{domain} does not resolve yet. Point its A record at this server ({guess_server_ip()}), "
+            "wait a few minutes and type it again (Ctrl+C to stop)."
+        )
+    return domain
+
+
+def check_email(answer: str) -> str:
+    """A plausible email address."""
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", answer):
+        raise ValueError("That does not look like an email address.")
+    return answer
+
+
+def check_port(answer: str, tls: bool) -> str:
+    """A port that can be used for the website."""
+    try:
+        port = int(answer)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise ValueError("Enter a number from 1 to 65535.")
+    if tls and port == 80:
+        raise ValueError("Port 80 stays free for Let's Encrypt and the redirect to HTTPS; 443 is the usual HTTPS port.")
+    if port < 1024 and not is_root():
+        raise ValueError("Ports below 1024 need root: run with sudo, or pick 1024 or higher (for example 8000).")
+    if not port_is_free(port):
+        raise ValueError(f"Port {port} is already used by another program; pick another.")
+    return str(port)
+
+
+def ask_questions(existing: SiteConfig | None, acme_server: str) -> tuple[SiteConfig, bool]:
+    """The setup questions. Returns the answers and whether to install the systemd service."""
+    say("\nMedia Library setup", "bold")
+    say("Press Enter to accept the suggestion in [brackets].\n", "dim")
+    old = existing or SiteConfig(media_root="", password_hash="", port=0)
+    default_folder = old.media_root or ("/srv/media" if is_root() else str(Path.home() / "media"))
+    media_root = ask("Folder with your videos, photos and music", default_folder, check=check_media_folder)
+    password_hash = ask_password(old.password_hash)
+    tls = ask_yes_no("Get a free HTTPS certificate (Let's Encrypt) for a domain?", old.tls)
+    domain = email = ""
+    if tls:
+        if not is_root():
+            raise SetupError(f"Getting a certificate needs port 80, which only root may use. Run: sudo python3 {SCRIPT} setup")
+        if not port_is_free(80):
+            raise SetupError(PORT_80_BUSY)
+        domain = ask("Domain name (its DNS must already point to this server)", old.domain, check=check_domain)
+        email = ask("Email for Let's Encrypt notices (optional, Enter to skip)", old.email, check=check_email, optional=True)
+    port_default = old.port if old.port and old.tls == tls else (443 if tls else 8000)
+    port = int(ask("Port for the website", str(port_default), check=lambda answer: check_port(answer, tls)))
+    as_service = systemd_available() and ask_yes_no("Run it in the background and start it at boot (systemd service)?", True)
+    site = SiteConfig(media_root, password_hash, port, domain=domain, email=email, acme_server=acme_server, host=old.host)
+    return site, as_service
+
+
+def setup(existing: SiteConfig | None, acme_server: str) -> None:
+    """Ask the questions, install what is needed, get the certificate, start the site."""
+    was_running = service_active()
+    if was_running:
+        say(f"Stopping the {SERVICE_NAME} service while it is reconfigured...", "dim")
+        systemctl("stop", SERVICE_NAME)
+    try:
+        site, as_service = ask_questions(existing, acme_server)
+        say("\nSetting up", "bold")
+        ensure_ffmpeg()
+        load_secret_key("", APP_DIR / ".secret_key")  # created now, while we may still write anywhere
+        (APP_DIR / ".thumbs").mkdir(exist_ok=True)
+        open_firewall([80, site.port] if site.tls else [site.port])
+        if site.tls:
+            if not certbot_path().exists():
+                pip_install(CERTBOT_REQUIREMENT)
+            obtain_certificate(site)
+            done(f"Certificate for {site.domain}, valid until {certificate_expiry(certificate_files(site.domain)[0]) or '?'}")
+        site.save()
+    except BaseException:
+        if was_running:  # nothing was changed: keep the site up with its old settings
+            systemctl("start", SERVICE_NAME)
+            say(f"The {SERVICE_NAME} service is running again with the previous settings.", "dim")
+        raise
+    done(f"Settings saved in {CONFIG_FILE}")
+    if as_service:
+        install_service(site)
+        done(f"Service '{SERVICE_NAME}' is running and starts at boot")
+    elif SERVICE_FILE.exists() and systemd_available():
+        uninstall_service()  # asked not to run as a service any more
+    say(f"\nYour media library: {site.public_url()}", "bold")
+    if not site.tls:
+        say("Without HTTPS the password travels unencrypted; run setup again to add a certificate.", "yellow")
+    say("Cloud firewall (security group)? Allow TCP " + ("80 and " if site.tls else "") + f"{site.port} there too.", "dim")
+    if as_service:
+        say(f"Logs: journalctl -u {SERVICE_NAME} -f    Change settings: sudo python3 {SCRIPT} setup\n", "dim")
+    else:
+        say("Serving from this terminal; press Ctrl+C to stop.\n", "dim")
+        serve(site)
+
+
+def renew(site: SiteConfig | None, force: bool) -> None:
+    """`main.py renew`: renew the certificate now and load it into the running site."""
+    if site is None or not site.tls:
+        raise SetupError(f"HTTPS is not set up. Run: sudo python3 {SCRIPT} setup")
+    if not is_root():
+        raise SetupError(f"Renewing needs root: sudo python3 {SCRIPT} renew")
+    # The running site answers the challenge on port 80; otherwise do it here.
+    helper = PortEightyHelper(redirect_to=None) if port_is_free(80) else None
+    try:
+        changed = renew_certificate(site, force, right_away=True)
+    finally:
+        if helper:
+            helper.close()
+    expiry = certificate_expiry(certificate_files(site.domain)[0]) or "?"
+    if not changed:
+        say(f"Not due for renewal yet (valid until {expiry}). Use --force to renew anyway.")
+        return
+    done(f"Renewed; valid until {expiry}")
+    if service_active():
+        systemctl("reload", SERVICE_NAME)
+        done("The running service loaded the new certificate")
+    else:
+        say("Send SIGHUP to a server started by hand (or restart it) to load it.", "dim")
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Command line entry point."""
+    parser = argparse.ArgumentParser(
+        prog="main.py",
+        description="Personal media library server.",
+        epilog="Without a command, the first run sets everything up and later runs start the server.",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="start",
+        choices=("start", "setup", "serve", "renew", "uninstall"),
+        help="setup: change the settings; serve: run without questions; renew: renew the HTTPS "
+        "certificate now; uninstall: remove the systemd service",
+    )
+    parser.add_argument("--staging", action="store_true", help="setup: use Let's Encrypt's staging server (test certificates)")
+    parser.add_argument("--acme-server", default="", metavar="URL", help="setup: directory URL of another ACME server")
+    parser.add_argument("--force", action="store_true", help="renew: renew even if the certificate is not due yet")
+    args = parser.parse_args(argv)
+    acme_server = LETSENCRYPT_STAGING if args.staging else args.acme_server
+    try:
+        env_mode = "MEDIA_ROOT" in os.environ or "MEDIA_PASSWORD" in os.environ
+        site = None if env_mode else SiteConfig.load()
+        if args.command == "setup" or (args.command == "start" and site is None and not env_mode):
+            setup(site, acme_server)
+        elif args.command == "renew":
+            renew(site, args.force)
+        elif args.command == "uninstall":
+            uninstall_service()
+        elif args.command == "start" and site and SERVICE_FILE.exists() and systemd_available():
+            start_service(site)
+            say(f"Media Library is running at {site.public_url()} (service '{SERVICE_NAME}')", "green")
+        else:
+            serve(site)
+    except (SetupError, ConfigError) as problem:
+        say(f"\n{problem}", "red")
+        raise SystemExit(1) from None
+    except KeyboardInterrupt:
+        say("\nCancelled.")
+        raise SystemExit(130) from None
+
+
+# --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
 
 if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
 
-# Built at import so that both `python main.py` and `uvicorn main:app` check
-# the configuration before serving anything.
-app = create_app()
-
-
-def main() -> None:
-    """``python main.py``: serve the app with Uvicorn on HOST:PORT."""
-    host = os.environ.get("HOST", "127.0.0.1")
-    try:
-        port = int(os.environ.get("PORT", "8000"))
-    except ValueError:
-        print(f"PORT must be a number, not {os.environ['PORT']!r}", file=sys.stderr)
-        raise SystemExit(2) from None
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        # Trust X-Forwarded-For/-Proto only from the reverse proxy, so the
-        # login rate limiter sees real client addresses.
-        proxy_headers=True,
-        forwarded_allow_ips=os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1"),
-        server_header=False,
-    )
-
-
 if __name__ == "__main__":
     main()
+else:
+    # `uvicorn main:app`: settings come from environment variables or config.json.
+    app = create_app()

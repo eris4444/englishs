@@ -1,5 +1,9 @@
 __pycache__/
 .pytest_cache/
-# Generated at runtime next to main.py; never commit these.
-.secret_key
+# Created by main.py next to itself at runtime; never commit these.
+.venv/
+.certbot/
 .thumbs/
+.secret_key
+config.json
+.config.json.tmp
