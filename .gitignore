@@ -1,0 +1,5 @@
+__pycache__/
+.pytest_cache/
+# Generated at runtime next to main.py; never commit these.
+.secret_key
+.thumbs/
