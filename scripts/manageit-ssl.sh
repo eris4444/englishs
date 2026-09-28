@@ -261,7 +261,7 @@ wait_port80_free() {
 }
 
 open_firewall_http() {
-    if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    if command -v ufw >/dev/null && [[ $(ufw status 2>/dev/null) == *"Status: active"* ]]; then
         ufw allow 80/tcp >/dev/null && ok "ufw: allowed 80/tcp (needed now and for renewals)"
     fi
     if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then

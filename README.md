@@ -91,6 +91,11 @@ A web server already on port 80 (such as the nginx above) is stopped for a few s
 during issue and each renewal. `--webroot DIR` avoids that, and `--dns` validates through
 a TXT record instead of port 80. `--help` lists every option.
 
+If the site then shows ManageIt's 502 page ("the origin is unreachable"), run
+`sudo bash scripts/manageit-check.sh https://media.example.com/` with the failing address.
+It fetches the address through the CDN while watching which port of the server the CDN
+connects to, and prints the cause (wrong SSL mode, blocked port, service not listening).
+
 ## Tests
 
 ```sh
