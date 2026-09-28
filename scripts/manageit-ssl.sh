@@ -375,16 +375,62 @@ certbot_failure_hints() {
     fi
 }
 
+# Make sure something really runs `certbot renew` (it renews ~30 days before expiry).
+# Returns 1, after saying why, when nothing on this server can do it.
 ensure_auto_renew() {
-    if systemctl list-timers --all 2>/dev/null | grep -q 'certbot'; then
-        ok "Auto-renewal: certbot systemd timer is active"
-    elif grep -qs 'certbot' /etc/cron.d/* /var/spool/cron/crontabs/root /var/spool/cron/root; then
-        ok "Auto-renewal: certbot cron job exists"
-    else
-        printf '%s\n' "SHELL=/bin/sh" "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-            "$((RANDOM % 60)) */12 * * * root certbot renew -q" >/etc/cron.d/manageit-certbot-renew
-        ok "Auto-renewal: added /etc/cron.d/manageit-certbot-renew (twice a day, renews ~30 days before expiry)"
+    local timer schedule
+    if [[ -d /run/systemd/system ]]; then
+        # Under systemd, Debian/Ubuntu's /etc/cron.d/certbot deliberately does nothing,
+        # so only an active timer counts.
+        for timer in certbot.timer certbot-renew.timer snap.certbot.renew.timer manageit-certbot-renew.timer; do
+            if systemctl is-active --quiet "$timer"; then
+                ok "Auto-renewal: systemd timer $timer is active"
+                return 0
+            fi
+        done
+        for timer in certbot.timer certbot-renew.timer; do
+            if systemctl enable --now "$timer" >/dev/null 2>&1; then
+                ok "Auto-renewal: turned on systemd timer $timer"
+                return 0
+            fi
+        done
+        printf '%s\n' "[Unit]" "Description=Renew Let's Encrypt certificates (manageit-ssl.sh)" "" \
+            "[Service]" "Type=oneshot" "ExecStart=$(command -v certbot) -q renew" \
+            >/etc/systemd/system/manageit-certbot-renew.service
+        printf '%s\n' "[Unit]" "Description=Run certbot renew twice a day (manageit-ssl.sh)" "" \
+            "[Timer]" "OnCalendar=*-*-* 00,12:00:00" "RandomizedDelaySec=12h" "Persistent=true" "" \
+            "[Install]" "WantedBy=timers.target" \
+            >/etc/systemd/system/manageit-certbot-renew.timer
+        if systemctl daemon-reload && systemctl enable --now manageit-certbot-renew.timer >/dev/null 2>&1; then
+            ok "Auto-renewal: added systemd timer manageit-certbot-renew.timer (twice a day)"
+            return 0
+        fi
+        warn "Could not turn on a systemd timer for certbot renew."
+        return 1
     fi
+
+    # No systemd: a cron job is needed, and a cron daemon that actually runs it.
+    if ! grep -qs 'certbot' /etc/cron.d/* /etc/crontabs/root /var/spool/cron/crontabs/root /var/spool/cron/root; then
+        schedule="$((RANDOM % 60)) */12 * * *"
+        if [[ -d /etc/cron.d ]]; then
+            printf '%s\n' "SHELL=/bin/sh" "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+                "$schedule root certbot renew -q" >/etc/cron.d/manageit-certbot-renew
+        else
+            { crontab -l 2>/dev/null; echo "$schedule certbot renew -q"; } | crontab -
+        fi
+    fi
+    if ! pgrep -x 'cron|crond' >/dev/null; then
+        if ! command -v cron >/dev/null && ! command -v crond >/dev/null; then
+            pkg_install cron >/dev/null 2>&1 || pkg_install cronie >/dev/null 2>&1 || true
+        fi
+        service cron start >/dev/null 2>&1 || service crond start >/dev/null 2>&1 || true
+    fi
+    if pgrep -x 'cron|crond' >/dev/null; then
+        ok "Auto-renewal: certbot cron job, and cron is running"
+        return 0
+    fi
+    warn "This server runs neither systemd nor a cron daemon, so nothing renews the certificate by itself."
+    return 1
 }
 
 # --------------------------------------------------------------------- main --
@@ -527,9 +573,10 @@ names=$(openssl x509 -in "$LIVE/cert.pem" -noout -text | grep -o 'DNS:[^,]*' | c
 
 if [[ $MODE == dns ]]; then
     renew_note="Manual (--dns): run this script again before $expires."
-else
-    ensure_auto_renew
+elif ensure_auto_renew; then
     renew_note="Automatic. Test it any time with: certbot renew --dry-run"
+else
+    renew_note="${C_RED}NOT automatic here: run 'certbot renew' yourself before $expires${C_RST}"
 fi
 
 cat <<EOF
@@ -561,8 +608,9 @@ ${C_GRN}${C_BLD}========================================================${C_RST}
   These paths never change; renewals replace the files behind them. If a program
   only reads the certificate at start-up, add --deploy-hook "systemctl restart <it>".
 
-  In ManageIt you can now switch the connection to the origin to HTTPS (port 443,
-  "Full/Strict" if offered). Keep plain HTTP on port 80 reaching this server too
-  (origin protocol "auto/same as visitor"), or the automatic renewal will fail.
+  Once a program here serves HTTPS on port 443 with this certificate, ManageIt's
+  connection to the origin can be switched to HTTPS ("Full/Strict" if offered). Keep
+  plain HTTP on port 80 reaching this server too (origin protocol "auto/same as
+  visitor"), or renewals will fail.
   List certificates any time with: certbot certificates
 EOF
