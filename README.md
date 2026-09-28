@@ -76,6 +76,21 @@ server {
 }
 ```
 
+### Certificate behind the ManageIt CDN
+
+If the domain points to the server through the ManageIt CDN with the proxy on (so the
+server's IP is hidden), run `scripts/manageit-ssl.sh` on the server. It installs certbot,
+checks that the CDN forwards `/.well-known/acme-challenge/` to port 80, gets the
+Let's Encrypt certificate, sets up renewal and prints the full paths of the files:
+
+```sh
+sudo bash scripts/manageit-ssl.sh media.example.com
+```
+
+A web server already on port 80 (such as the nginx above) is stopped for a few seconds
+during issue and each renewal. `--webroot DIR` avoids that, and `--dns` validates through
+a TXT record instead of port 80. `--help` lists every option.
+
 ## Tests
 
 ```sh
