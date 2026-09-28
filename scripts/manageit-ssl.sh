@@ -125,6 +125,10 @@ normalized=()
 for d in "${DOMAINS[@]}"; do
     d=${d#*://}; d=${d%%/*}; d=${d%%:*}; d=${d%.}; d=${d,,}
     [[ $d =~ ^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9-]{2,63}$ ]] || die "Not a valid domain: $d"
+    if [[ $d =~ (^|\.)example\.(com|net|org)$ || $d =~ \.(example|test|invalid|localhost|local|internal)$ ]]; then
+        die "$d is only a placeholder, not your domain. Run it with the domain you added in ManageIt:
+    bash $0 yourdomain.com"
+    fi
     if [[ $d == \** && $MODE != dns ]]; then
         die "Wildcard $d can only be validated through DNS: add --dns"
     fi
@@ -312,6 +316,12 @@ selftest_http() {
             ok "$d: the CDN delivers /.well-known/acme-challenge/ to this server"
         else
             warn "$d: test file not received (HTTP ${code:-000}${err:+, $err})"
+            case ${code:-000} in
+                000) warn "    -> could not connect through the CDN at all (DNS or network problem)" ;;
+                404) warn "    -> something answered, but not this server: check the IP in the ManageIt record and that the origin port is 80 (HTTP)" ;;
+                403) warn "    -> blocked (403): a WAF/firewall rule in ManageIt or on this server" ;;
+                5??) warn "    -> the CDN could not reach this server on port 80: firewall, or origin set to HTTPS/443" ;;
+            esac
             failed=1
         fi
         rm -f "$TMP_DIR/body" "$TMP_DIR/err"
@@ -334,6 +344,35 @@ http_hints() {
       4. No WAF, firewall or cache rule in ManageIt blocks /.well-known/acme-challenge/.
     Or skip port 80 entirely: run again with --dns (you add one TXT record by hand).
 EOF
+}
+
+dns_hints() {
+    cat >&2 <<'EOF'
+
+    Let's Encrypt did not see the right TXT record. In the ManageIt DNS panel check:
+      1. Type TXT, name _acme-challenge (for sub.example.com: _acme-challenge.sub),
+         value exactly as certbot showed it.
+      2. With two names (example.com + *.example.com) BOTH TXT records must exist.
+      3. Wait a minute or two after saving before pressing Enter.
+EOF
+}
+
+# Explain a certbot failure from what Let's Encrypt answered (in certbot's log), so only
+# the hints that match the actual error are shown.
+certbot_failure_hints() {
+    local log=/var/log/letsencrypt/letsencrypt.log
+    [[ -r $log ]] || return 0
+    if grep -Eq 'rejectedIdentifier|forbidden by policy' "$log"; then
+        warn "Let's Encrypt refuses to issue for this name (reserved or blocked names such as example.com)."
+        warn "Run the script with your own domain."
+    elif grep -q 'rateLimited' "$log"; then
+        warn "Let's Encrypt rate limit reached: wait as long as the error above says. Test with --dry-run meanwhile."
+    elif grep -q 'error:caa' "$log"; then
+        warn "A CAA record on the domain doesn't allow Let's Encrypt. In the ManageIt DNS panel delete it,"
+        warn "or add one more: CAA  0 issue \"letsencrypt.org\""
+    elif grep -Eq 'error:(connection|unauthorized|incorrectResponse|dns|tls)' "$log"; then
+        if [[ $MODE == dns ]]; then dns_hints; else http_hints; fi
+    fi
 }
 
 ensure_auto_renew() {
@@ -372,7 +411,7 @@ for d in "${DOMAINS[@]}"; do
     if [[ -n $SERVER_IP && " $ips " == *" $SERVER_IP "* ]]; then
         ok "$d -> $ips (points straight at this server, proxy off)"
     else
-        ok "$d -> $ips (CDN edge, proxy on)"
+        info "$d -> $ips (behind the CDN; step 3 checks that it reaches this server)"
     fi
 done
 
@@ -469,8 +508,8 @@ for d in "${DOMAINS[@]}"; do cmd+=(-d "$d"); done
 
 info "$(printf '%q ' "${cmd[@]}")"
 if ! "${cmd[@]}"; then
-    [[ $MODE == dns ]] || http_hints
-    die "certbot failed; its log is /var/log/letsencrypt/letsencrypt.log"
+    certbot_failure_hints
+    die "certbot failed; the reason is in its message above (full log: /var/log/letsencrypt/letsencrypt.log)"
 fi
 
 if ((DRY_RUN)); then
