@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{NAME}} | {{TAGLINE}}</title>
+<style>
+  :root { --bg:#f4f6fb; --card:#fff; --text:#141a2a; --muted:#68708a; --line:#e3e7f0; --accent:#2563eb; --accent2:#06b6d4; --ok:#16a34a; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1220; --card:#151c2e; --text:#e6e9f2; --muted:#9aa3ba; --line:#242d44; --accent:#5b8cff; --accent2:#22d3ee; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: Vazirmatn, IRANSans, Tahoma, "Segoe UI", sans-serif; line-height:1.8; }
+  a { color:inherit; text-decoration:none; }
+  .wrap { max-width:1100px; margin:0 auto; padding:0 16px; }
+  header { background:linear-gradient(135deg, var(--accent), var(--accent2)); color:#fff; padding:22px 0 90px; }
+  .nav { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .brand { display:flex; align-items:center; gap:10px; font-weight:800; font-size:20px; }
+  .brand svg { width:34px; height:34px; }
+  .nav ul { display:flex; gap:18px; list-style:none; margin:0; padding:0; font-size:14px; opacity:.95; flex-wrap:wrap; }
+  .hero { text-align:center; margin-top:44px; }
+  .hero h1 { margin:0 0 6px; font-size:clamp(24px, 4vw, 36px); }
+  .hero p { margin:0; opacity:.9; }
+  .search { max-width:640px; margin:26px auto 0; display:flex; background:#fff; border-radius:14px; padding:6px; box-shadow:0 10px 30px rgba(0,0,0,.15); }
+  .search input { flex:1; border:0; outline:0; font:inherit; padding:10px 14px; background:transparent; color:#141a2a; min-width:0; }
+  .search button { border:0; background:var(--accent); color:#fff; font:inherit; padding:0 22px; border-radius:10px; cursor:pointer; }
+  main { margin-top:-56px; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:12px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; text-align:center; box-shadow:0 6px 20px rgba(20,30,60,.06); }
+  .stat b { display:block; font-size:22px; color:var(--accent); }
+  .stat span { color:var(--muted); font-size:13px; }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; margin:28px 0 14px; }
+  .chip { border:1px solid var(--line); background:var(--card); border-radius:999px; padding:6px 16px; cursor:pointer; font:inherit; font-size:14px; color:var(--text); }
+  .chip.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .list { display:grid; gap:10px; }
+  .item { display:grid; grid-template-columns:48px 1fr auto; gap:14px; align-items:center; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px 16px; }
+  .icon { width:48px; height:48px; border-radius:12px; display:grid; place-items:center; color:#fff; font-weight:800; font-size:18px; }
+  .item h3 { margin:0; font-size:16px; }
+  .meta { color:var(--muted); font-size:13px; display:flex; gap:14px; flex-wrap:wrap; }
+  .dl { background:var(--ok); color:#fff; border:0; border-radius:10px; padding:9px 16px; font:inherit; font-size:14px; cursor:pointer; display:flex; align-items:center; gap:6px; white-space:nowrap; }
+  .dl svg { width:16px; height:16px; }
+  .empty { text-align:center; color:var(--muted); padding:30px; display:none; }
+  section h2 { font-size:18px; margin:40px 0 14px; }
+  .features { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:12px; }
+  .feature { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; }
+  .feature b { display:block; margin-bottom:4px; }
+  .feature p { margin:0; color:var(--muted); font-size:14px; }
+  footer { margin-top:56px; border-top:1px solid var(--line); padding:22px 0 30px; color:var(--muted); font-size:13px; }
+  footer .wrap { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(120px); background:#111827; color:#fff; padding:12px 20px; border-radius:12px; transition:transform .3s; font-size:14px; }
+  .toast.show { transform:translateX(-50%) translateY(0); }
+  @media (max-width:560px) { .item { grid-template-columns:40px 1fr; } .icon { width:40px; height:40px; } .dl { grid-column:1 / -1; justify-content:center; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="nav">
+      <a class="brand" href="/">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        {{NAME}}
+      </a>
+      <ul><li><a href="/">صفحه اصلی</a></li><li><a href="#software">نرم‌افزار</a></li><li><a href="#features">راهنما</a></li><li><a href="#contact">تماس</a></li></ul>
+    </div>
+    <div class="hero">
+      <h1>{{TAGLINE}}</h1>
+      <p>بدون تبلیغ، بدون انتظار؛ همه فایل‌ها بررسی و فشرده شده‌اند.</p>
+      <form class="search" id="searchForm">
+        <input id="q" type="search" placeholder="نام نرم‌افزار را جست‌وجو کنید…" autocomplete="off">
+        <button type="submit">جست‌وجو</button>
+      </form>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="stats">
+    <div class="stat"><b>۱۲٬۴۸۰</b><span>فایل آماده دانلود</span></div>
+    <div class="stat"><b>۲٫۳ میلیون</b><span>دانلود این ماه</span></div>
+    <div class="stat"><b>۱ گیگابیت</b><span>سرعت سرور</span></div>
+    <div class="stat"><b>۲۴/۷</b><span>پشتیبانی</span></div>
+  </div>
+
+  <div class="chips" id="software">
+    <button class="chip on" data-cat="all">همه</button>
+    <button class="chip" data-cat="win">ویندوز</button>
+    <button class="chip" data-cat="android">اندروید</button>
+    <button class="chip" data-cat="mac">مک</button>
+    <button class="chip" data-cat="linux">لینوکس</button>
+    <button class="chip" data-cat="game">بازی</button>
+  </div>
+
+  <div class="list" id="list"></div>
+  <div class="empty" id="empty">موردی پیدا نشد.</div>
+
+  <section id="features">
+    <h2>چرا {{NAME}}؟</h2>
+    <div class="features">
+      <div class="feature"><b>لینک مستقیم</b><p>همه فایل‌ها بدون واسطه و با قابلیت ادامه دانلود.</p></div>
+      <div class="feature"><b>بررسی امنیتی</b><p>هر فایل پیش از انتشار با چند آنتی‌ویروس بررسی می‌شود.</p></div>
+      <div class="feature"><b>نسخه‌های قدیمی</b><p>آرشیو نسخه‌های قبلی برای سازگاری با سیستم‌های قدیمی.</p></div>
+      <div class="feature"><b>نیم‌بها</b><p>دانلود از سرورهای داخلی با ترافیک نیم‌بها.</p></div>
+    </div>
+  </section>
+</main>
+
+<footer id="contact">
+  <div class="wrap">
+    <span>© {{YEAR}} {{NAME}} — همه حقوق محفوظ است.</span>
+    <span>پشتیبانی: {{EMAIL}} · {{PHONE}}</span>
+  </div>
+</footer>
+<div class="toast" id="toast"></div>
+
+<script>
+  var files = [
+    ["7-Zip", "win", "24.08", "1.6 MB", "۱۴۰۵/۰۸/۰۲", "#1f6feb"],
+    ["VLC Media Player", "win", "3.0.21", "42 MB", "۱۴۰۵/۰۷/۲۸", "#f97316"],
+    ["Notepad++", "win", "8.7.1", "5.1 MB", "۱۴۰۵/۰۷/۲۵", "#22c55e"],
+    ["Telegram Desktop", "win", "5.6.3", "48 MB", "۱۴۰۵/۰۸/۰۱", "#0ea5e9"],
+    ["LibreOffice", "linux", "24.8.2", "320 MB", "۱۴۰۵/۰۷/۱۹", "#14b8a6"],
+    ["GIMP", "linux", "2.10.38", "290 MB", "۱۴۰۵/۰۷/۱۲", "#8b5cf6"],
+    ["Firefox", "mac", "131.0", "140 MB", "۱۴۰۵/۰۸/۰۲", "#ef4444"],
+    ["Visual Studio Code", "mac", "1.95.1", "195 MB", "۱۴۰۵/۰۷/۳۰", "#3b82f6"],
+    ["Signal", "android", "7.24.2", "62 MB", "۱۴۰۵/۰۷/۲۷", "#2563eb"],
+    ["NewPipe", "android", "0.27.2", "11 MB", "۱۴۰۵/۰۷/۲۲", "#dc2626"],
+    ["K-9 Mail", "android", "8.2", "9.4 MB", "۱۴۰۵/۰۷/۱۵", "#f59e0b"],
+    ["SuperTuxKart", "game", "1.4", "680 MB", "۱۴۰۵/۰۶/۳۰", "#10b981"],
+    ["0 A.D.", "game", "0.27", "1.9 GB", "۱۴۰۵/۰۶/۲۴", "#a855f7"],
+    ["Mindustry", "game", "146", "160 MB", "۱۴۰۵/۰۶/۱۸", "#e11d48"]
+  ];
+  var cat = "all", list = document.getElementById("list");
+  function render() {
+    var q = document.getElementById("q").value.trim().toLowerCase(), n = 0;
+    list.innerHTML = "";
+    files.forEach(function (f) {
+      if ((cat !== "all" && f[1] !== cat) || (q && f[0].toLowerCase().indexOf(q) < 0)) return;
+      n++;
+      var el = document.createElement("div");
+      el.className = "item";
+      el.innerHTML = '<div class="icon"></div><div><h3></h3><div class="meta"><span></span><span></span><span></span></div></div>' +
+        '<button class="dl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>دانلود</button>';
+      el.querySelector(".icon").style.background = f[5];
+      el.querySelector(".icon").textContent = f[0][0];
+      el.querySelector("h3").textContent = f[0];
+      var m = el.querySelectorAll(".meta span");
+      m[0].textContent = "نسخه " + f[2]; m[1].textContent = "حجم " + f[3]; m[2].textContent = f[4];
+      el.querySelector(".dl").onclick = function () { toast("لینک دانلود «" + f[0] + "» در حال آماده‌سازی است…"); };
+      list.appendChild(el);
+    });
+    document.getElementById("empty").style.display = n ? "none" : "block";
+  }
+  document.querySelectorAll(".chip").forEach(function (c) {
+    c.onclick = function () {
+      document.querySelectorAll(".chip").forEach(function (x) { x.classList.remove("on"); });
+      c.classList.add("on"); cat = c.dataset.cat; render();
+    };
+  });
+  document.getElementById("searchForm").onsubmit = function (e) { e.preventDefault(); render(); };
+  document.getElementById("q").oninput = render;
+  var tt;
+  function toast(t) { var el = document.getElementById("toast"); el.textContent = t; el.classList.add("show"); clearTimeout(tt); tt = setTimeout(function () { el.classList.remove("show"); }, 2600); }
+  render();
+</script>
+</body>
+</html>

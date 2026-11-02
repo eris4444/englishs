@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{NAME}} | فروشگاه اینترنتی</title>
+<style>
+  :root { --bg:#fff8f3; --card:#fff; --text:#24160c; --muted:#7a6656; --line:#f1e4d8; --a:#ea580c; --a2:#f59e0b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#17100b; --card:#21170f; --text:#f5ebe2; --muted:#bba796; --line:#3a2a1d; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: Vazirmatn, IRANSans, Tahoma, "Segoe UI", sans-serif; line-height:1.8; }
+  .wrap { max-width:1160px; margin:0 auto; padding:0 16px; }
+  .bar { background:var(--a); color:#fff; font-size:13px; text-align:center; padding:6px; }
+  header { position:sticky; top:0; background:var(--card); border-bottom:1px solid var(--line); z-index:5; }
+  .head { display:flex; align-items:center; gap:16px; padding:12px 0; }
+  .logo { font-weight:900; font-size:21px; color:var(--a); white-space:nowrap; }
+  .find { flex:1; display:flex; border:1px solid var(--line); border-radius:12px; overflow:hidden; background:var(--bg); }
+  .find input { flex:1; border:0; outline:0; background:transparent; padding:9px 12px; font:inherit; color:var(--text); min-width:0; }
+  .cart { position:relative; border:1px solid var(--line); background:var(--card); border-radius:12px; padding:8px 12px; cursor:pointer; font:inherit; color:var(--text); display:flex; gap:6px; align-items:center; }
+  .cart b { background:var(--a); color:#fff; border-radius:999px; font-size:12px; min-width:20px; height:20px; display:grid; place-items:center; padding:0 6px; }
+  .cats { display:flex; gap:20px; padding:0 0 10px; font-size:14px; color:var(--muted); overflow-x:auto; white-space:nowrap; }
+  .banner { margin:22px 0; border-radius:22px; padding:34px; color:#fff; background:linear-gradient(120deg, var(--a), var(--a2)); display:flex; justify-content:space-between; align-items:center; gap:20px; flex-wrap:wrap; }
+  .banner h1 { margin:0 0 6px; font-size:clamp(22px, 3.6vw, 34px); }
+  .banner p { margin:0; opacity:.92; }
+  .timer { display:flex; gap:8px; direction:ltr; }
+  .timer span { background:rgba(255,255,255,.2); border-radius:10px; padding:8px 12px; font-weight:800; font-size:20px; min-width:56px; text-align:center; }
+  h2 { font-size:19px; margin:30px 0 14px; display:flex; justify-content:space-between; align-items:baseline; }
+  h2 small { font-size:13px; color:var(--a); font-weight:400; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(210px, 1fr)); gap:14px; }
+  .p { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:14px; display:flex; flex-direction:column; gap:8px; position:relative; }
+  .p .img { aspect-ratio:4/3; border-radius:12px; display:grid; place-items:center; font-size:46px; }
+  .p h3 { margin:0; font-size:15px; }
+  .p .rate { color:#f59e0b; font-size:13px; }
+  .price { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+  .price b { font-size:17px; }
+  .price s { color:var(--muted); font-size:13px; }
+  .off { position:absolute; top:22px; left:22px; background:#dc2626; color:#fff; border-radius:8px; font-size:12px; padding:1px 8px; }
+  .add { margin-top:auto; border:0; border-radius:12px; background:var(--a); color:#fff; padding:9px; font:inherit; cursor:pointer; }
+  .perks { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin:34px 0; }
+  .perk { border:1px dashed var(--line); border-radius:16px; padding:16px; text-align:center; color:var(--muted); font-size:14px; }
+  .perk b { display:block; color:var(--text); font-size:15px; }
+  footer { border-top:1px solid var(--line); padding:24px 0; color:var(--muted); font-size:13px; text-align:center; }
+  .toast { position:fixed; bottom:20px; left:20px; background:#111; color:#fff; padding:12px 18px; border-radius:12px; opacity:0; transform:translateY(20px); transition:.3s; }
+  .toast.show { opacity:1; transform:none; }
+</style>
+</head>
+<body>
+<div class="bar">ارسال رایگان برای خریدهای بالای ۲ میلیون تومان 🎁</div>
+<header>
+  <div class="wrap">
+    <div class="head">
+      <div class="logo">{{NAME}}</div>
+      <div class="find"><input placeholder="جست‌وجوی محصول، برند یا دسته…"></div>
+      <button class="cart" id="cart">سبد خرید <b id="count">۰</b></button>
+    </div>
+    <div class="cats"><span>موبایل</span><span>لپ‌تاپ</span><span>هدفون</span><span>ساعت هوشمند</span><span>لوازم جانبی</span><span>گیمینگ</span><span>خانه هوشمند</span></div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="banner">
+    <div><h1>حراج پاییزه تا ۴۰٪ تخفیف</h1><p>{{TAGLINE}}</p></div>
+    <div class="timer" id="timer"><span>00</span><span>00</span><span>00</span></div>
+  </div>
+
+  <h2>پیشنهادهای ویژه <small>مشاهده همه ←</small></h2>
+  <div class="grid" id="grid"></div>
+
+  <div class="perks">
+    <div class="perk"><b>ضمانت اصالت کالا</b>همه کالاها با گارانتی معتبر</div>
+    <div class="perk"><b>۷ روز ضمانت بازگشت</b>بدون پرسش و هزینه اضافه</div>
+    <div class="perk"><b>پرداخت در محل</b>در تهران و شهرهای بزرگ</div>
+    <div class="perk"><b>پشتیبانی</b>{{PHONE}}</div>
+  </div>
+</main>
+<footer>© {{YEAR}} {{NAME}} · {{EMAIL}}</footer>
+<div class="toast" id="toast"></div>
+
+<script>
+  var fa = function (n) { return String(n).replace(/\d/g, function (d) { return "۰۱۲۳۴۵۶۷۸۹"[d]; }); };
+  var money = function (n) { return fa(n.toLocaleString("en-US")).replace(/,/g, "٬") + " تومان"; };
+  var items = [
+    ["گوشی هوشمند نوا ۱۲", "📱", 18900000, 21500000, "#fde68a"],
+    ["هدفون بی‌سیم پالس", "🎧", 2350000, 3100000, "#bfdbfe"],
+    ["ساعت هوشمند آوا", "⌚", 4100000, 0, "#fecaca"],
+    ["لپ‌تاپ آرتا ۱۴ اینچ", "💻", 46800000, 52000000, "#c7d2fe"],
+    ["اسپیکر بلوتوثی رادیان", "🔊", 1650000, 0, "#bbf7d0"],
+    ["دسته بازی پرو", "🎮", 2900000, 3400000, "#fbcfe8"],
+    ["دوربین ورزشی اکشن", "📷", 7300000, 0, "#ddd6fe"],
+    ["پاوربانک ۲۰ هزار", "🔋", 1150000, 1450000, "#fed7aa"]
+  ];
+  var grid = document.getElementById("grid"), count = 0;
+  items.forEach(function (it) {
+    var d = document.createElement("div"); d.className = "p";
+    d.innerHTML = '<div class="img"></div><h3></h3><div class="rate">★★★★☆</div><div class="price"><b></b><s></s></div><button class="add">افزودن به سبد</button>';
+    d.querySelector(".img").textContent = it[1]; d.querySelector(".img").style.background = it[4];
+    d.querySelector("h3").textContent = it[0];
+    d.querySelector("b").textContent = money(it[2]);
+    if (it[3]) {
+      d.querySelector("s").textContent = money(it[3]);
+      var o = document.createElement("span"); o.className = "off"; o.textContent = fa(Math.round(100 - it[2] / it[3] * 100)) + "٪";
+      d.appendChild(o);
+    }
+    d.querySelector(".add").onclick = function () { count++; document.getElementById("count").textContent = fa(count); toast("«" + it[0] + "» به سبد اضافه شد"); };
+    grid.appendChild(d);
+  });
+  var tt; function toast(t) { var e = document.getElementById("toast"); e.textContent = t; e.classList.add("show"); clearTimeout(tt); tt = setTimeout(function () { e.classList.remove("show"); }, 2200); }
+  document.getElementById("cart").onclick = function () { toast(count ? "سبد شما " + fa(count) + " کالا دارد" : "سبد خرید خالی است"); };
+  function tick() {
+    var now = new Date(), end = new Date(now); end.setHours(24, 0, 0, 0);
+    var s = Math.floor((end - now) / 1000), p = [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60];
+    var spans = document.querySelectorAll("#timer span");
+    p.forEach(function (v, i) { spans[i].textContent = fa(String(v).padStart(2, "0")); });
+  }
+  tick(); setInterval(tick, 1000);
+</script>
+</body>
+</html>

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{NAME}}</title>
+<style>
+  :root { --bg:#f7f6f3; --card:#fff; --text:#1f2328; --muted:#5f6670; --line:#e4e2dc; --accent:#2f6f5e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16181b; --card:#1e2125; --text:#e8e6e3; --muted:#a0a4aa; --line:#2c3035; --accent:#6cc4a8; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: Vazirmatn, IRANSans, Tahoma, "Segoe UI", sans-serif; line-height:1.9; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 48px 16px 64px; }
+  header { display:flex; align-items:center; gap:16px; margin-bottom:40px; }
+  .logo { width:56px; height:56px; border-radius:14px; background:var(--accent); color:#fff; display:grid; place-items:center; font-size:26px; font-weight:700; flex:none; }
+  h1 { margin:0; font-size:26px; }
+  header p { margin:0; color:var(--muted); }
+  nav { display:flex; gap:16px; margin:-20px 0 32px; font-size:14px; }
+  nav a { color:var(--accent); text-decoration:none; }
+  h2 { font-size:18px; margin:40px 0 12px; }
+  .post { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:12px; }
+  .post h3 { margin:0 0 4px; font-size:16px; }
+  .post time { color:var(--muted); font-size:13px; }
+  .post p { margin:8px 0 0; color:var(--muted); }
+  .tags { display:flex; gap:6px; margin-top:10px; flex-wrap:wrap; }
+  .tags span { font-size:12px; border:1px solid var(--line); border-radius:999px; padding:1px 10px; color:var(--muted); }
+  footer { margin-top:48px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">✎</div>
+    <div>
+      <h1>{{NAME}}</h1>
+      <p>{{TAGLINE}}</p>
+    </div>
+  </header>
+  <nav><a href="#posts">نوشته‌ها</a><a href="#about">درباره من</a><a href="#contact">تماس</a></nav>
+
+  <h2 id="posts">تازه‌ترین نوشته‌ها</h2>
+  <article class="post">
+    <h3>شروع دوباره</h3>
+    <time>پاییز {{YEAR}}</time>
+    <p>بعد از مدت‌ها تصمیم گرفتم دوباره بنویسم؛ کوتاه، ساده و هر هفته. این‌جا قرار است دفترچه‌ی عمومی من باشد.</p>
+    <div class="tags"><span>روزمره</span><span>نوشتن</span></div>
+  </article>
+  <article class="post">
+    <h3>سه کتابی که امسال خواندم</h3>
+    <time>تابستان {{YEAR}}</time>
+    <p>فهرستی کوتاه از کتاب‌هایی که نگاهم را به کار و زندگی عوض کردند، با چند جمله‌ی کوتاه از هر کدام.</p>
+    <div class="tags"><span>کتاب</span><span>معرفی</span></div>
+  </article>
+  <article class="post">
+    <h3>یادداشت سفر به شمال</h3>
+    <time>بهار {{YEAR}}</time>
+    <p>جاده‌ی چالوس، مه صبحگاهی و یک چای داغ کنار رودخانه. چند عکس و چند پیشنهاد برای سفر بعدی.</p>
+    <div class="tags"><span>سفر</span><span>عکس</span></div>
+  </article>
+  <article class="post">
+    <h3>چطور عادت کتاب‌خواندن را نگه دارم</h3>
+    <time>زمستان {{YEAR}}</time>
+    <p>روزی بیست صفحه، بدون استثنا. چیزهایی که کمک کرد و چیزهایی که فقط وقت را گرفت.</p>
+    <div class="tags"><span>عادت</span><span>کتاب</span></div>
+  </article>
+
+  <h2 id="about">درباره‌ی من</h2>
+  <p>اینجا خانه‌ی کوچک من در اینترنت است؛ درباره‌ی چیزهایی می‌نویسم که دوستشان دارم.</p>
+
+  <footer id="contact">© {{YEAR}} {{NAME}} — ایمیل: {{EMAIL}}</footer>
+</div>
+</body>
+</html>

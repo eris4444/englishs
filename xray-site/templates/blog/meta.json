@@ -1,0 +1,14 @@
+{
+  "title": "وبلاگ شخصی",
+  "title_en": "Personal blog",
+  "description": "وبلاگ ساده و خوانا با نوشته‌های اخیر و صفحه درباره من",
+  "description_en": "Simple, readable blog with recent posts",
+  "lang": "fa",
+  "accent": "#2f6f5e",
+  "defaults": {
+    "NAME": "یادداشت‌های من",
+    "TAGLINE": "جایی برای نوشتن درباره‌ی کتاب، سفر و چیزهایی که یاد می‌گیرم.",
+    "EMAIL": "hello@example.com",
+    "PHONE": ""
+  }
+}

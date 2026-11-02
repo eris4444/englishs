@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{NAME}} — به‌زودی</title>
+<style>
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; color:#fff; font-family: Vazirmatn, IRANSans, Tahoma, "Segoe UI", sans-serif; line-height:1.8; background:#0b0620; overflow:hidden; }
+  .bg { position:fixed; inset:-20%; background:radial-gradient(circle at 20% 30%, #7c3aed 0, transparent 35%), radial-gradient(circle at 80% 20%, #db2777 0, transparent 30%), radial-gradient(circle at 60% 80%, #0ea5e9 0, transparent 35%); filter:blur(60px); opacity:.7; animation:move 18s ease-in-out infinite alternate; }
+  @keyframes move { to { transform:rotate(25deg) scale(1.15); } }
+  .box { position:relative; text-align:center; padding:24px 16px; max-width:720px; width:100%; }
+  .logo { width:70px; height:70px; margin:0 auto 20px; border-radius:20px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.25); display:grid; place-items:center; font-size:32px; backdrop-filter:blur(10px); }
+  h1 { font-size:clamp(30px, 6vw, 56px); margin:0 0 8px; }
+  p { margin:0 auto 30px; opacity:.85; max-width:520px; }
+  .count { display:flex; gap:12px; justify-content:center; direction:ltr; margin-bottom:32px; flex-wrap:wrap; }
+  .count div { width:96px; padding:14px 0; border-radius:18px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.18); backdrop-filter:blur(12px); }
+  .count b { display:block; font-size:34px; line-height:1.2; }
+  .count span { font-size:12px; opacity:.7; }
+  form { display:flex; gap:8px; max-width:440px; margin:0 auto; background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.2); border-radius:14px; padding:6px; }
+  input { flex:1; border:0; outline:0; background:transparent; color:#fff; font:inherit; padding:8px 12px; min-width:0; }
+  input::placeholder { color:rgba(255,255,255,.6); }
+  button { border:0; border-radius:10px; padding:0 20px; font:inherit; cursor:pointer; background:#fff; color:#1e1b4b; font-weight:700; }
+  .foot { margin-top:28px; font-size:13px; opacity:.6; }
+</style>
+</head>
+<body>
+<div class="bg"></div>
+<div class="box">
+  <div class="logo">✦</div>
+  <h1>{{NAME}}</h1>
+  <p>{{TAGLINE}}</p>
+  <div class="count" id="count">
+    <div><b>0</b><span>روز</span></div><div><b>0</b><span>ساعت</span></div><div><b>0</b><span>دقیقه</span></div><div><b>0</b><span>ثانیه</span></div>
+  </div>
+  <form id="f"><input type="email" required placeholder="ایمیل خود را وارد کنید"><button>خبرم کن</button></form>
+  <div class="foot">© {{YEAR}} {{NAME}} · {{EMAIL}}</div>
+</div>
+<script>
+  var fa = function (n) { return String(n).replace(/\d/g, function (d) { return "۰۱۲۳۴۵۶۷۸۹"[d]; }); };
+  var launch = {{LAUNCH_MS}};
+  function tick() {
+    var s = Math.max(0, Math.floor((launch - Date.now()) / 1000));
+    var v = [Math.floor(s / 86400), Math.floor(s / 3600) % 24, Math.floor(s / 60) % 60, s % 60];
+    document.querySelectorAll("#count b").forEach(function (b, i) { b.textContent = fa(String(v[i]).padStart(2, "0")); });
+  }
+  tick(); setInterval(tick, 1000);
+  document.getElementById("f").onsubmit = function (e) { e.preventDefault(); this.innerHTML = '<div style="padding:8px;width:100%">ثبت شد؛ از اولین خبر جا نمی‌مانید ✓</div>'; };
+</script>
+</body>
+</html>

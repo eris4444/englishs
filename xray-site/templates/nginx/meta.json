@@ -1,0 +1,14 @@
+{
+  "title": "صفحه پیش‌فرض nginx",
+  "title_en": "nginx default page",
+  "description": "همان صفحه «Welcome to nginx!»؛ ساده‌ترین و بی‌سروصداترین ظاهر",
+  "description_en": "The plain 'Welcome to nginx!' page",
+  "lang": "en",
+  "accent": "#009639",
+  "defaults": {
+    "NAME": "",
+    "TAGLINE": "",
+    "EMAIL": "",
+    "PHONE": ""
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "title": "شرکت فناوری",
+  "title_en": "Tech company",
+  "description": "سایت شرکتی با معرفی خدمات، آمار، مشتریان و راه‌های تماس",
+  "description_en": "Company site with services, numbers and contact",
+  "lang": "fa",
+  "accent": "#7c3aed",
+  "defaults": {
+    "NAME": "نوآوران داده پارس",
+    "TAGLINE": "راهکارهای نرم‌افزاری و زیرساخت ابری برای کسب‌وکارها",
+    "EMAIL": "info@example.com",
+    "PHONE": "۰۲۱-۸۸۰۰۰۰۰۰"
+  }
+}

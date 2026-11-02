@@ -1,0 +1,14 @@
+{
+  "title": "دانلود سنتر",
+  "title_en": "Download center",
+  "description": "مرکز دانلود نرم‌افزار با جست‌وجو، دسته‌بندی و لیست فایل‌ها",
+  "description_en": "File/software download site with search and categories",
+  "lang": "fa",
+  "accent": "#2563eb",
+  "defaults": {
+    "NAME": "دانلودستان",
+    "TAGLINE": "دانلود مستقیم و پرسرعت نرم‌افزار، بازی و اپلیکیشن",
+    "EMAIL": "support@example.com",
+    "PHONE": "۰۲۱-۱۲۳۴۵۶۷۸"
+  }
+}

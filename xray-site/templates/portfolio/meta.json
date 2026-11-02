@@ -1,0 +1,14 @@
+{
+  "title": "نمونه‌کار و پورتفولیو",
+  "title_en": "Portfolio",
+  "description": "صفحه شخصی طراح یا عکاس با گالری کارها، مهارت‌ها و تماس",
+  "description_en": "Designer / photographer gallery and skills",
+  "lang": "fa",
+  "accent": "#e11d48",
+  "defaults": {
+    "NAME": "سارا محمدی",
+    "TAGLINE": "طراح رابط کاربری و عکاس؛ ساختن تصویرهایی که در ذهن می‌مانند",
+    "EMAIL": "sara@example.com",
+    "PHONE": ""
+  }
+}

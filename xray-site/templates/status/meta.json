@@ -1,0 +1,14 @@
+{
+  "title": "صفحه وضعیت سرویس (انگلیسی)",
+  "title_en": "Status page (English)",
+  "description": "Status page با وضعیت سرویس‌ها، نمودار آپتایم ۹۰ روزه و تاریخچه رخدادها",
+  "description_en": "Service status with 90-day uptime bars",
+  "lang": "en",
+  "accent": "#16a34a",
+  "defaults": {
+    "NAME": "Nimbus Cloud",
+    "TAGLINE": "Live status of our APIs, dashboards and data centers",
+    "EMAIL": "status@example.com",
+    "PHONE": ""
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "title": "به‌زودی (در دست ساخت)",
+  "title_en": "Coming soon",
+  "description": "صفحه «به‌زودی» با شمارش معکوس و فرم خبرنامه",
+  "description_en": "Countdown page with a newsletter form",
+  "lang": "fa",
+  "accent": "#8b5cf6",
+  "defaults": {
+    "NAME": "پروژه نو",
+    "TAGLINE": "چیزی تازه در راه است؛ به‌زودی با شما خواهیم بود.",
+    "EMAIL": "hello@example.com",
+    "PHONE": ""
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "title": "هاستینگ و سرور ابری",
+  "title_en": "Hosting company",
+  "description": "سایت شرکت میزبانی با تعرفه‌ها، امکانات و سؤالات متداول",
+  "description_en": "Hosting / cloud provider with plans and FAQ",
+  "lang": "fa",
+  "accent": "#0ea5e9",
+  "defaults": {
+    "NAME": "ابرآسا",
+    "TAGLINE": "هاست پرسرعت، سرور مجازی و ابری با پشتیبانی شبانه‌روزی",
+    "EMAIL": "sales@example.com",
+    "PHONE": "۰۲۱-۴۲۰۰۰۰۰۰"
+  }
+}

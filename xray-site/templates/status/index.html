@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{NAME}} Status</title>
+<style>
+  :root { --bg:#f6f8fa; --card:#fff; --text:#1f2328; --muted:#656d76; --line:#d8dee4; --ok:#1a7f37; --warn:#bf8700; --bad:#cf222e; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --card:#161b22; --text:#e6edf3; --muted:#8d96a0; --line:#30363d; --ok:#3fb950; --warn:#d29922; --bad:#f85149; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height:1.6; }
+  .wrap { max-width:860px; margin:0 auto; padding:32px 16px 48px; }
+  .top { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:28px; }
+  .brand { font-weight:700; font-size:20px; display:flex; gap:10px; align-items:center; }
+  .brand i { width:28px; height:28px; border-radius:7px; background:linear-gradient(135deg, #2563eb, #16a34a); }
+  .sub { border:1px solid var(--line); background:var(--card); color:var(--text); border-radius:8px; padding:7px 14px; font:inherit; font-size:14px; cursor:pointer; }
+  .banner { background:var(--ok); color:#fff; border-radius:10px; padding:16px 20px; font-weight:600; font-size:18px; display:flex; gap:10px; align-items:center; }
+  .note { color:var(--muted); font-size:13px; margin:8px 0 26px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .row { padding:16px 20px; border-top:1px solid var(--line); }
+  .row:first-child { border-top:0; }
+  .row .h { display:flex; justify-content:space-between; gap:10px; }
+  .row .h span { color:var(--ok); font-size:14px; }
+  .bars { display:flex; gap:2px; margin-top:10px; height:30px; }
+  .bars i { flex:1; border-radius:2px; background:var(--ok); opacity:.85; }
+  .bars i.w { background:var(--warn); } .bars i.b { background:var(--bad); }
+  .scale { display:flex; justify-content:space-between; color:var(--muted); font-size:12px; margin-top:4px; }
+  h2 { font-size:18px; margin:36px 0 12px; }
+  .inc { border-bottom:1px solid var(--line); padding:14px 0; }
+  .inc b { display:block; }
+  .inc small { color:var(--muted); }
+  .inc p { margin:4px 0 0; color:var(--muted); font-size:14px; }
+  footer { margin-top:36px; color:var(--muted); font-size:13px; text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><div class="brand"><i></i>{{NAME}}</div><button class="sub" onclick="this.textContent='Subscribed ✓'">Subscribe to updates</button></div>
+  <div class="banner">✓ All Systems Operational</div>
+  <div class="note">{{TAGLINE}} · Last updated <span id="upd"></span></div>
+  <div class="card" id="comps"></div>
+
+  <h2>Past incidents</h2>
+  <div id="inc"></div>
+  <footer>© {{GYEAR}} {{NAME}} · Questions? {{EMAIL}}</footer>
+</div>
+<script>
+  var comps = ["API", "Dashboard", "Authentication", "Object Storage", "CDN — Europe", "CDN — Asia", "Webhooks"];
+  var seed = 7;
+  function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+  var box = document.getElementById("comps");
+  comps.forEach(function (c) {
+    var r = document.createElement("div"); r.className = "row";
+    var bars = "", down = 0;
+    for (var i = 0; i < 90; i++) { var x = rnd(), cls = x > .985 ? "b" : x > .96 ? "w" : ""; if (cls) down++; bars += '<i class="' + cls + '"></i>'; }
+    r.innerHTML = '<div class="h"><b></b><span>Operational</span></div><div class="bars">' + bars + '</div><div class="scale"><span>90 days ago</span><span></span><span>Today</span></div>';
+    r.querySelector("b").textContent = c;
+    r.querySelectorAll(".scale span")[1].textContent = (100 - down * 0.02).toFixed(2) + "% uptime";
+    box.appendChild(r);
+  });
+  var d = new Date(); document.getElementById("upd").textContent = d.toUTCString().replace(" GMT", " UTC");
+  var inc = [
+    ["Elevated API latency", 3, "Resolved — A misbehaving cache node caused slow responses for about 18 minutes."],
+    ["Delayed webhook deliveries", 11, "Resolved — Deliveries were queued during a database failover and sent once it completed."],
+    ["Scheduled maintenance: Object Storage", 24, "Completed — Storage nodes were upgraded with no customer impact."]
+  ];
+  var ib = document.getElementById("inc");
+  inc.forEach(function (x) {
+    var e = document.createElement("div"); e.className = "inc";
+    var t = new Date(Date.now() - x[1] * 864e5);
+    e.innerHTML = "<b></b><small></small><p></p>";
+    e.querySelector("b").textContent = x[0];
+    e.querySelector("small").textContent = t.toDateString();
+    e.querySelector("p").textContent = x[2];
+    ib.appendChild(e);
+  });
+</script>
+</body>
+</html>

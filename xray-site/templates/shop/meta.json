@@ -1,0 +1,14 @@
+{
+  "title": "فروشگاه اینترنتی",
+  "title_en": "Online shop",
+  "description": "ویترین فروشگاه با محصولات، قیمت، سبد خرید و پیشنهاد ویژه",
+  "description_en": "Store front with products, prices and a cart",
+  "lang": "fa",
+  "accent": "#ea580c",
+  "defaults": {
+    "NAME": "بازارچه نارنج",
+    "TAGLINE": "خرید آنلاین لوازم دیجیتال با ارسال سریع به سراسر کشور",
+    "EMAIL": "shop@example.com",
+    "PHONE": "۰۲۱-۹۱۰۰۰۰۰۰"
+  }
+}
