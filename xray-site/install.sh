@@ -1,33 +1,34 @@
 #!/usr/bin/env bash
-# Website + Xray on one port.
+# Website + the x-ui VPN inbound on one port.
 #
-# nginx listens on the port your router forwards to. A normal browser visit gets the
-# website; a VPN client (VLESS over WebSocket on a secret path) is handed to Xray, which
-# listens only on 127.0.0.1. Run as root on Debian/Ubuntu (dnf/yum also work).
+# The router forwards public port 8080 to this server's port 1234. HAProxy listens on 1234
+# and looks at the first bytes of every connection: a browser gets the website (nginx on
+# 127.0.0.1), everything else goes to the x-ui inbound on port 8080. x-ui itself is not
+# changed, and the links from the x-ui panel keep working (address = public IP, port 8080).
 #
 #   sudo bash install.sh
 #
 # Settings (environment variables):
 #   SERVER_PORT  port on this server that the router forwards to   (default 1234)
-#   PUBLIC_PORT  port people use from the internet                 (default 8080)
+#   XUI_PORT     port of the x-ui inbound                          (default 8080)
+#   PUBLIC_PORT  port people use from the internet, for the summary (default 8080)
+#   SITE_PORT    internal port for the website, on 127.0.0.1       (default 8081, or next free)
 #   PUBLIC_IP    your public IP; detected automatically if empty
-#   XRAY_ZIP     path to a downloaded Xray-linux-*.zip, if GitHub is unreachable
-#   ALLOW_LAN    1 lets VPN users reach your home network (default 0: blocked)
+#   XUI_DB       x-ui database                                     (default /etc/x-ui/x-ui.db)
 #
-# Running it again keeps the same UUID and path, so existing clients keep working.
+# Run it again after changing the inbound in x-ui (transport, path, Proxy Protocol).
 set -euo pipefail
 
 SERVER_PORT="${SERVER_PORT:-1234}"
+XUI_PORT="${XUI_PORT:-8080}"
 PUBLIC_PORT="${PUBLIC_PORT:-8080}"
+SITE_PORT="${SITE_PORT:-}"
 PUBLIC_IP="${PUBLIC_IP:-}"
-XRAY_VERSION="${XRAY_VERSION:-v26.3.27}"
-XRAY_ZIP="${XRAY_ZIP:-}"
-ALLOW_LAN="${ALLOW_LAN:-0}"
-XRAY_LOCAL_PORT="${XRAY_LOCAL_PORT:-10000}"
+XUI_DB="${XUI_DB:-/etc/x-ui/x-ui.db}"
 
 SITE_DIR=/var/www/xray-site
 CONF_DIR=/etc/xray-site
-XRAY_BIN=/usr/local/bin/xray
+HAPROXY_CONF=$CONF_DIR/haproxy.cfg
 NGINX_CONF=/etc/nginx/conf.d/xray-site.conf
 UNIT=/etc/systemd/system/xray-site.service
 
@@ -38,159 +39,171 @@ die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "Run as root: sudo bash $0"
 
 # ---------------------------------------------------------------- packages
-say "Installing nginx, curl, unzip"
+say "Installing nginx, haproxy, curl, python3"
 if command -v apt-get >/dev/null; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq nginx curl unzip ca-certificates iproute2 >/dev/null
-    apt-get install -y -qq qrencode >/dev/null 2>&1 || true
+    apt-get install -y -qq nginx haproxy curl python3 iproute2 ca-certificates >/dev/null
 elif command -v dnf >/dev/null; then
-    dnf install -y -q nginx curl unzip iproute
-    dnf install -y -q qrencode >/dev/null 2>&1 || true
+    dnf install -y -q nginx haproxy curl python3 iproute
 elif command -v yum >/dev/null; then
-    yum install -y -q epel-release >/dev/null 2>&1 || true
-    yum install -y -q nginx curl unzip iproute
-    yum install -y -q qrencode >/dev/null 2>&1 || true
+    yum install -y -q nginx haproxy curl python3 iproute
 else
-    die "No apt-get, dnf or yum found. Install nginx, curl and unzip yourself, then run again."
+    die "No apt-get, dnf or yum found. Install nginx, haproxy, curl and python3, then run again."
+fi
+HAPROXY_BIN="$(command -v haproxy)" || die "haproxy is not installed."
+
+# ---------------------------------------------------------------- x-ui inbound
+# Read the inbound on XUI_PORT from the x-ui database (read-only) to learn how VPN
+# clients will talk to it.
+XUI_ERROR="" XUI_REMARK="" XUI_ENABLE=1 XUI_LISTEN="" XUI_PROTO="" XUI_NET="" XUI_SEC=""
+XUI_PATHS="" XUI_HOSTS="" XUI_PP=0
+if [ -r "$XUI_DB" ]; then
+    eval "$(python3 - "$XUI_DB" "$XUI_PORT" <<'PY'
+import json, re, shlex, sqlite3, sys
+
+db, port = sys.argv[1], int(sys.argv[2])
+def out(**kv):
+    for k, v in kv.items():
+        print(f"XUI_{k}={shlex.quote(str(v))}")
+
+try:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    rows = con.execute(
+        "SELECT remark, enable, listen, protocol, stream_settings FROM inbounds WHERE port = ?",
+        (port,)).fetchall()
+except Exception as e:
+    out(ERROR=f"could not read {db}: {e}")
+    sys.exit()
+if not rows:
+    out(ERROR=f"x-ui has no inbound on port {port}")
+    sys.exit()
+
+rows.sort(key=lambda r: not r[1])                     # prefer an enabled one
+remark, enable, listen, proto, stream = rows[0]
+s = json.loads(stream or "{}")
+net = s.get("network") or "tcp"
+sec = s.get("security") or "none"
+paths, hosts = [], []
+
+def section(*names):
+    for n in names:
+        if isinstance(s.get(n), dict):
+            return s[n]
+    return {}
+
+def as_list(v):
+    if not v:
+        return []
+    return v if isinstance(v, list) else [x.strip() for x in str(v).split(",") if x.strip()]
+
+if net in ("tcp", "raw"):
+    st = section("tcpSettings", "rawSettings")
+    header = st.get("header") or {}
+    if header.get("type") == "http":
+        req = header.get("request") or {}
+        net = "tcp-http"
+        paths = as_list(req.get("path")) or ["/"]
+        hosts = as_list((req.get("headers") or {}).get("Host"))
+elif net in ("ws", "httpupgrade", "xhttp", "splithttp"):
+    st = section({"ws": "wsSettings", "httpupgrade": "httpupgradeSettings",
+                  "xhttp": "xhttpSettings", "splithttp": "splithttpSettings"}[net])
+    paths = [st.get("path") or "/"]
+    hosts = as_list(st.get("host") or (st.get("headers") or {}).get("Host"))
+else:
+    st = {}
+
+pp = bool(st.get("acceptProxyProtocol") or (s.get("sockopt") or {}).get("acceptProxyProtocol"))
+# Only plain characters go into the HAProxy config; the query part is not part of the path.
+paths = [p.split("?")[0] or "/" for p in paths]
+paths = [p for p in paths if re.fullmatch(r"/[A-Za-z0-9._~%!+,=:@/-]*", p)]
+hosts = [h for h in hosts if re.fullmatch(r"[A-Za-z0-9.-]+(:[0-9]+)?", h)]
+out(REMARK=remark or "", ENABLE=1 if enable else 0, LISTEN=listen or "", PROTO=proto,
+    NET=net, SEC=sec, PATHS=" ".join(paths), HOSTS=" ".join(hosts), PP=1 if pp else 0)
+PY
+)"
+    [ -n "$XUI_ERROR$XUI_PROTO" ] || XUI_ERROR="could not read the inbound from $XUI_DB"
+else
+    XUI_ERROR="$XUI_DB not found"
 fi
 
-# ---------------------------------------------------------------- xray binary
-if [ -x "$XRAY_BIN" ]; then
-    say "Xray already installed: $("$XRAY_BIN" version | head -1)"
+if [ -n "$XUI_ERROR" ]; then
+    warn "$XUI_ERROR. Using general rules: they cover TCP, TLS/REALITY, WebSocket, HTTPUpgrade"
+    warn "and gRPC inbounds, but not XHTTP or TCP with an HTTP header."
+    XUI_NET=unknown
 else
-    case "$(uname -m)" in
-        x86_64|amd64)  asset=Xray-linux-64.zip ;;
-        aarch64|arm64) asset=Xray-linux-arm64-v8a.zip ;;
-        armv7l|armv7)  asset=Xray-linux-arm32-v7a.zip ;;
-        i386|i686)     asset=Xray-linux-32.zip ;;
-        *) die "Unsupported CPU $(uname -m). Download Xray yourself and pass XRAY_ZIP=..." ;;
-    esac
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
-    if [ -n "$XRAY_ZIP" ]; then
-        cp "$XRAY_ZIP" "$tmp/xray.zip"
-    else
-        say "Downloading Xray $XRAY_VERSION ($asset)"
-        curl -fL --retry 3 -o "$tmp/xray.zip" \
-            "https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION/$asset" ||
-        curl -fL --retry 3 -o "$tmp/xray.zip" \
-            "https://github.com/XTLS/Xray-core/releases/latest/download/$asset" ||
-        die "Could not download Xray from GitHub. Download $asset by hand and run: XRAY_ZIP=/path/to/$asset bash $0"
-    fi
-    unzip -qo "$tmp/xray.zip" -d "$tmp/x"
-    install -m 755 "$tmp/x/xray" "$XRAY_BIN"
-    mkdir -p /usr/local/share/xray
-    cp -f "$tmp/x/"*.dat /usr/local/share/xray/ 2>/dev/null || true
-    say "Installed $("$XRAY_BIN" version | head -1)"
+    say "x-ui inbound on port $XUI_PORT: \"$XUI_REMARK\" $XUI_PROTO / $XUI_NET / security $XUI_SEC"
+    [ "$XUI_ENABLE" = 1 ] || warn "This inbound is disabled in x-ui; enable it or VPN clients cannot connect."
 fi
+
+case "$XUI_NET" in
+    kcp|mkcp|quic|hysteria*)
+        die "The inbound uses $XUI_NET, which runs over UDP and cannot share a TCP port with a website.
+Change its transport in x-ui (TCP, WebSocket, XHTTP or gRPC), then run this again." ;;
+esac
+
+# Which HTTP requests belong to x-ui instead of the website.
+HTTP_RULES=""
+if [ "$XUI_SEC" = "none" ] || [ "$XUI_NET" = unknown ]; then
+    case "$XUI_NET" in
+        ws|httpupgrade|unknown)
+            # Browsers never ask for a WebSocket upgrade on this site.
+            HTTP_RULES="    use_backend xui if HTTP { hdr(upgrade) -i websocket }" ;;
+        xhttp|splithttp|tcp-http)
+            for p in $XUI_PATHS; do
+                [ "$p" = "/" ] && continue
+                HTTP_RULES="$HTTP_RULES
+    use_backend xui if HTTP { path -m str ${p%/} } or HTTP { path -m beg ${p%/}/ }"
+            done
+            for h in $XUI_HOSTS; do
+                HTTP_RULES="$HTTP_RULES
+    use_backend xui if HTTP { hdr(host) -i $h }"
+            done
+            [ -n "$HTTP_RULES" ] || die "The inbound ($XUI_NET) uses path \"/\" and no host, so its requests look
+exactly like a browser opening the website. In x-ui, give the inbound a path such as
+/$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n') (and update the client links), then run this again." ;;
+    esac
+fi
+
+# ---------------------------------------------------------------- x-ui reachable?
+case "$XUI_LISTEN" in
+    ""|0.0.0.0|::|"[::]") XUI_ADDR=127.0.0.1 ;;
+    *) XUI_ADDR="$XUI_LISTEN" ;;
+esac
+timeout 3 bash -c "exec 3<>/dev/tcp/$XUI_ADDR/$XUI_PORT" 2>/dev/null ||
+    die "Nothing answers on $XUI_ADDR:$XUI_PORT. Is x-ui running (x-ui status) and the inbound enabled?"
+case "$XUI_ADDR" in *:*) XUI_SERVER="ipv6@$XUI_ADDR:$XUI_PORT" ;; *) XUI_SERVER="$XUI_ADDR:$XUI_PORT" ;; esac
+XUI_SEND_PROXY=""
+[ "$XUI_PP" = 1 ] && XUI_SEND_PROXY=" send-proxy-v2"
 
 # ---------------------------------------------------------------- ports
-# A port is free if nothing listens on it, or only what an earlier run of this script
-# started there: nginx for the public ports, the xray-site service for Xray's port.
-port_busy_by_other() {  # $1 port, $2 nginx|xray
-    local owners pid
-    owners="$(ss -ltnpH "sport = :$1" 2>/dev/null || true)"
-    [ -n "$owners" ] || return 1
-    if [ "$2" = nginx ]; then
-        ! grep -q '"nginx"' <<<"$owners"
+listeners() { ss -ltnpH "sport = :$1" 2>/dev/null || true; }
+
+owners="$(listeners "$SERVER_PORT")"
+if [ -n "$owners" ]; then
+    if grep -q '"haproxy"' <<<"$owners" && systemctl is-active --quiet xray-site; then
+        :   # this script's splitter from an earlier run
+    elif grep -q '"nginx"' <<<"$owners" && grep -qs "listen $SERVER_PORT" "$NGINX_CONF"; then
+        :   # the previous version of this script; replaced below
     else
-        pid="$(systemctl show -p MainPID --value xray-site 2>/dev/null || true)"
-        ! { [ -n "$pid" ] && [ "$pid" != 0 ] && grep -q "pid=$pid," <<<"$owners"; }
-    fi
-}
-port_busy_by_other "$SERVER_PORT" nginx &&
-    die "Port $SERVER_PORT is already used by another program:
-$(ss -ltnpH "sport = :$SERVER_PORT")
+        die "Port $SERVER_PORT is already used by another program:
+$owners
 Stop it, or run with SERVER_PORT=<another port> and change the router forward to match."
-port_busy_by_other "$XRAY_LOCAL_PORT" xray &&
-    die "Port $XRAY_LOCAL_PORT (Xray's internal port) is in use. Run with XRAY_LOCAL_PORT=<free port>."
-
-listens="    listen $SERVER_PORT default_server;"
-if [ "$PUBLIC_PORT" != "$SERVER_PORT" ]; then
-    if port_busy_by_other "$PUBLIC_PORT" nginx; then
-        warn "Port $PUBLIC_PORT is used by another program; nginx will listen only on $SERVER_PORT."
-    else
-        # Also answer on the public port, for testing inside your home network.
-        listens="$listens
-    listen $PUBLIC_PORT default_server;"
     fi
 fi
+[ "$SERVER_PORT" != "$XUI_PORT" ] || die "SERVER_PORT and XUI_PORT are both $XUI_PORT; they must differ."
 
-# ---------------------------------------------------------------- secrets
-mkdir -p "$CONF_DIR"
-if [ -f "$CONF_DIR/config.json" ]; then
-    UUID="$(grep -oE '"id": *"[0-9a-f-]{36}"' "$CONF_DIR/config.json" | grep -oE '[0-9a-f-]{36}' | head -1 || true)"
-    WS_PATH="$(grep -oE '"path": *"/[^"]+"' "$CONF_DIR/config.json" | sed -E 's/.*"(\/[^"]+)"/\1/' | head -1 || true)"
+# The website's internal port: keep the one from an earlier run, otherwise the first free one.
+if [ -z "$SITE_PORT" ]; then
+    SITE_PORT="$(grep -oE 'listen 127\.0\.0\.1:[0-9]+' "$NGINX_CONF" 2>/dev/null | grep -oE '[0-9]+$' | head -1 || true)"
+    if [ -z "$SITE_PORT" ]; then
+        for p in $(seq 8081 8199); do
+            [ "$p" = "$XUI_PORT" ] || [ "$p" = "$SERVER_PORT" ] && continue
+            [ -z "$(listeners "$p")" ] && { SITE_PORT=$p; break; }
+        done
+    fi
 fi
-if [ -z "${UUID:-}" ] || [ -z "${WS_PATH:-}" ]; then
-    UUID="$(cat /proc/sys/kernel/random/uuid)"
-    WS_PATH="/$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    say "Generated new UUID and secret path"
-else
-    say "Keeping existing UUID and path from $CONF_DIR/config.json"
-fi
-
-# ---------------------------------------------------------------- xray config
-if [ "$ALLOW_LAN" = "1" ]; then
-    domain_strategy=AsIs
-    lan_rule=''
-else
-    # Stop VPN users from reaching this server's own services or your home network
-    # (router admin page, other devices). IPIfNonMatch resolves host names first, so
-    # "localhost" or a name pointing at 192.168.x.x is caught too.
-    domain_strategy=IPIfNonMatch
-    lan_rule='{ "type": "field", "outboundTag": "block", "ip": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "::1/128", "fc00::/7", "fe80::/10"] }'
-fi
-
-cat > "$CONF_DIR/config.json" <<EOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "tag": "vless-ws",
-      "listen": "127.0.0.1",
-      "port": $XRAY_LOCAL_PORT,
-      "protocol": "vless",
-      "settings": {
-        "clients": [ { "id": "$UUID", "email": "user1" } ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "ws",
-        "wsSettings": { "path": "$WS_PATH" }
-      },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
-    }
-  ],
-  "outbounds": [
-    { "tag": "direct", "protocol": "freedom" },
-    { "tag": "block", "protocol": "blackhole" }
-  ],
-  "routing": { "domainStrategy": "$domain_strategy", "rules": [ $lan_rule ] }
-}
-EOF
-chmod 644 "$CONF_DIR/config.json"
-"$XRAY_BIN" run -test -c "$CONF_DIR/config.json" >/dev/null || die "Xray rejected $CONF_DIR/config.json"
-
-cat > "$UNIT" <<EOF
-[Unit]
-Description=Xray (VLESS over WebSocket, behind nginx)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=nobody
-Environment=XRAY_LOCATION_ASSET=/usr/local/share/xray
-ExecStart=$XRAY_BIN run -c $CONF_DIR/config.json
-Restart=on-failure
-RestartSec=3
-NoNewPrivileges=true
-LimitNOFILE=1000000
-
-[Install]
-WantedBy=multi-user.target
-EOF
+[ -n "$SITE_PORT" ] || die "No free port found for the website between 8081 and 8199; set SITE_PORT."
 
 # ---------------------------------------------------------------- website
 mkdir -p "$SITE_DIR"
@@ -266,32 +279,20 @@ HTML
 fi
 chmod -R a+rX "$SITE_DIR"
 
-# ---------------------------------------------------------------- nginx
+# ---------------------------------------------------------------- nginx (website only)
+# HAProxy passes the visitor's address with the PROXY protocol, so nginx logs real IPs.
 cat > "$NGINX_CONF" <<EOF
-# Website + Xray on one port. Written by xray-site/install.sh.
+# Website behind the HAProxy splitter. Written by xray-site/install.sh.
 server {
-$listens
+    listen 127.0.0.1:$SITE_PORT proxy_protocol;
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
     server_name _;
     server_tokens off;
 
     root $SITE_DIR;
     index index.html;
 
-    # VPN clients: VLESS over WebSocket on a secret path, handed to Xray.
-    location = $WS_PATH {
-        if (\$http_upgrade !~* ^websocket\$) { return 404; }
-        proxy_pass http://127.0.0.1:$XRAY_LOCAL_PORT;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_buffering off;
-        proxy_read_timeout 1d;
-        proxy_send_timeout 1d;
-    }
-
-    # Everyone else: the website.
     location / {
         try_files \$uri \$uri/ =404;
     }
@@ -303,17 +304,77 @@ if [ ! -e /proc/net/if_inet6 ] && [ -f /etc/nginx/sites-enabled/default ]; then
     sed -i --follow-symlinks -E 's/^(\s*)listen \[::\]/\1# listen [::]/' /etc/nginx/sites-enabled/default
 fi
 
+mkdir -p "$CONF_DIR"
 if ! nginx -t 2>"$CONF_DIR/nginx-test.log"; then
     cat "$CONF_DIR/nginx-test.log" >&2
     rm -f "$NGINX_CONF"
     die "nginx rejected the config (shown above); $NGINX_CONF was removed."
 fi
 
-# SELinux (Fedora/RHEL/CentOS): let nginx use these ports and connect to Xray.
+# ---------------------------------------------------------------- haproxy (the splitter)
+cat > "$HAPROXY_CONF" <<EOF
+# Website + x-ui on one port. Written by xray-site/install.sh; run it again to regenerate.
+# x-ui inbound: "$XUI_REMARK" $XUI_PROTO / $XUI_NET / security $XUI_SEC
+global
+    user haproxy
+    group haproxy
+
+defaults
+    mode tcp
+    timeout connect 5s
+    timeout client 1h
+    timeout server 1h
+
+frontend public
+    bind :$SERVER_PORT
+    # Wait for the first bytes. Browsers and VPN clients both speak first, so this adds no delay.
+    tcp-request inspect-delay 5s
+    tcp-request content accept if HTTP
+
+    # gRPC without TLS starts with the HTTP/2 preface "PRI"; browsers never send it here.
+    use_backend xui if { req.payload(0,3) -m bin 505249 }
+$HTTP_RULES
+    use_backend site if HTTP
+    # Anything that is not plain HTTP (VLESS/VMess/Trojan/Shadowsocks, TLS, REALITY) is the VPN.
+    default_backend xui
+
+backend site
+    server site 127.0.0.1:$SITE_PORT send-proxy
+
+backend xui
+    server xui $XUI_SERVER$XUI_SEND_PROXY
+EOF
+"$HAPROXY_BIN" -c -q -f "$HAPROXY_CONF" || die "haproxy rejected $HAPROXY_CONF (errors above)."
+
+cat > "$UNIT" <<EOF
+[Unit]
+Description=Website + x-ui on one port (HAProxy splitter)
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStartPre=$HAPROXY_BIN -c -q -f $HAPROXY_CONF
+ExecStart=$HAPROXY_BIN -Ws -f $HAPROXY_CONF -p /run/xray-site.pid
+ExecReload=$HAPROXY_BIN -c -q -f $HAPROXY_CONF
+ExecReload=/bin/kill -USR2 \$MAINPID
+KillMode=mixed
+Restart=always
+RestartSec=3
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# The previous version of this script ran its own Xray; x-ui replaces it.
+rm -f "$CONF_DIR/config.json" "$CONF_DIR/client.txt"
+
+# SELinux (Fedora/RHEL/CentOS): let HAProxy use these ports and nginx listen on its port.
 if command -v getenforce >/dev/null && [ "$(getenforce)" != "Disabled" ]; then
-    setsebool -P httpd_can_network_connect 1 2>/dev/null || true
+    setsebool -P haproxy_connect_any 1 2>/dev/null || true
     if command -v semanage >/dev/null; then
-        for p in $SERVER_PORT $PUBLIC_PORT; do
+        for p in $SERVER_PORT $SITE_PORT; do
             semanage port -a -t http_port_t -p tcp "$p" 2>/dev/null ||
             semanage port -m -t http_port_t -p tcp "$p" 2>/dev/null || true
         done
@@ -321,65 +382,62 @@ if command -v getenforce >/dev/null && [ "$(getenforce)" != "Disabled" ]; then
 fi
 
 # ---------------------------------------------------------------- start
-say "Starting Xray and nginx"
+say "Starting nginx and the splitter"
+systemctl enable --quiet nginx
+if systemctl is-active --quiet nginx; then systemctl reload nginx; else systemctl restart nginx; fi
+sleep 1   # let nginx release SERVER_PORT if the previous version had it
 systemctl daemon-reload
 systemctl enable --quiet xray-site
 systemctl restart xray-site
-systemctl enable --quiet nginx
-if systemctl is-active --quiet nginx; then systemctl reload nginx; else systemctl restart nginx; fi
 
 # ---------------------------------------------------------------- firewall
 if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
     ufw allow "$SERVER_PORT/tcp" >/dev/null
-    [ "$PUBLIC_PORT" != "$SERVER_PORT" ] && ufw allow "$PUBLIC_PORT/tcp" >/dev/null
     say "ufw: opened $SERVER_PORT/tcp"
 elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
     firewall-cmd -q --permanent --add-port="$SERVER_PORT/tcp"
-    [ "$PUBLIC_PORT" != "$SERVER_PORT" ] && firewall-cmd -q --permanent --add-port="$PUBLIC_PORT/tcp"
     firewall-cmd -q --reload
     say "firewalld: opened $SERVER_PORT/tcp"
 fi
 
 # ---------------------------------------------------------------- self-check
 sleep 1
-systemctl is-active --quiet xray-site || { journalctl -u xray-site -n 20 --no-pager >&2 || true; die "Xray did not start (log above)."; }
-code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$SERVER_PORT/")"
+systemctl is-active --quiet xray-site ||
+    { journalctl -u xray-site -n 20 --no-pager >&2 || true; die "The splitter did not start (log above)."; }
+code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$SERVER_PORT/" || true)"
 [ "$code" = "200" ] || die "The website answered HTTP $code on port $SERVER_PORT instead of 200."
-code="$(curl -s -o /dev/null -w '%{http_code}' --http1.1 \
-    -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
-    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' --max-time 3 \
-    "http://127.0.0.1:$SERVER_PORT$WS_PATH" || true)"
-[ "$code" = "101" ] || die "The VPN path answered HTTP $code instead of 101; check: journalctl -u xray-site"
-say "Self-check passed: website 200, VPN path 101"
+if [ "$XUI_SEC" = none ] && { [ "$XUI_NET" = ws ] || [ "$XUI_NET" = httpupgrade ]; }; then
+    p="${XUI_PATHS%% *}"; h="${XUI_HOSTS%% *}"
+    code="$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 3 ${h:+-H "Host: $h"} \
+        -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+        -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "http://127.0.0.1:$SERVER_PORT$p" || true)"
+    [ "$code" = "101" ] || die "x-ui did not accept the WebSocket through port $SERVER_PORT (HTTP $code)."
+    say "Self-check passed: website 200, x-ui WebSocket 101"
+else
+    say "Self-check passed: website 200, x-ui reachable on $XUI_ADDR:$XUI_PORT"
+fi
 
-# ---------------------------------------------------------------- client link
+# ---------------------------------------------------------------- summary
 if [ -z "$PUBLIC_IP" ]; then
     for u in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com https://ipinfo.io/ip; do
         PUBLIC_IP="$(curl -4 -fsS --max-time 5 "$u" 2>/dev/null | tr -d '[:space:]')" && [ -n "$PUBLIC_IP" ] && break
     done
 fi
-[ -n "$PUBLIC_IP" ] || { PUBLIC_IP="YOUR_PUBLIC_IP"; warn "Could not detect your public IP; replace YOUR_PUBLIC_IP in the link."; }
+PUBLIC_IP="${PUBLIC_IP:-YOUR_PUBLIC_IP}"
 
-enc_path="${WS_PATH//\//%2F}"
-LINK="vless://$UUID@$PUBLIC_IP:$PUBLIC_PORT?encryption=none&security=none&type=ws&path=$enc_path#home-$PUBLIC_PORT"
+cat <<EOF
 
-cat > "$CONF_DIR/client.txt" <<EOF
-Website:   http://$PUBLIC_IP:$PUBLIC_PORT/
-VPN link:  $LINK
+  Website:  http://$PUBLIC_IP:$PUBLIC_PORT/
+  VPN:      use the links from the x-ui panel. In them the address must be $PUBLIC_IP
+            and the port $PUBLIC_PORT (not the server's local IP).
 
-Manual settings
-  protocol  VLESS
-  address   $PUBLIC_IP
-  port      $PUBLIC_PORT
-  uuid      $UUID
-  network   ws
-  path      $WS_PATH
-  security  none (no TLS)
+  Website files: $SITE_DIR      Splitter config: $HAPROXY_CONF
 EOF
-chmod 600 "$CONF_DIR/client.txt"
+if [ "$XUI_PP" != 1 ] && [ "$XUI_NET" != unknown ]; then
+    cat <<EOF
 
+  Note: x-ui now sees every VPN user as 127.0.0.1, so an IP limit on clients will not
+  work. To fix it, turn on "Proxy Protocol" for this inbound in x-ui and run this again.
+EOF
+fi
 echo
-cat "$CONF_DIR/client.txt"
-echo
-if command -v qrencode >/dev/null; then qrencode -t ansiutf8 "$LINK"; fi
-say "Saved to $CONF_DIR/client.txt. Site files: $SITE_DIR"
