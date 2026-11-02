@@ -38,7 +38,8 @@ sudo xray-site
   ╭─ Status ───────────────────────────────────────────────
   │ ● splitter    ● website    ● x-ui
   │ Public IP  2.181.79.58        LAN  192.168.100.122
-  │ Site       Download center (download)   HTTPS on (vpn.example.com)
+  │ Site       Download center (download)
+  │ Serving    HTTP on  HTTPS on (vpn.example.com)
   │ SSL        1, next expiry in 82 days
   ╰────────────────────────────────────────────────────────
   ╭─ Ports ────────────────────────────────────────────────
@@ -56,7 +57,7 @@ sudo xray-site
     8  Get a free certificate          12  Status and connections
     9  Add my own certificate          13  Logs
    10  Manage certificates             14  Restart services
-   11  HTTPS for the site              15  Public IP
+   11  HTTP / HTTPS of the site        15  Public IP
                                        16  Update xray-site
                                        17  Uninstall
 ```
@@ -70,8 +71,8 @@ sudo xray-site
 | **6 متن‌های سایت** | نام، شعار، ایمیل و تلفن روی سایت (برای هر قالب جدا ذخیره می‌شود) |
 | **8 گواهی رایگان** | Let's Encrypt یا ZeroSSL با acme.sh؛ خودکار تمدید می‌شود |
 | **9 گواهی خودم** | چسباندن متن گواهی و کلید، یا دادن مسیر فایل‌ها روی سرور |
-| **10 مدیریت گواهی‌ها** | تمدید، حذف، نمایش مسیر فایل‌ها برای x-ui، هدایت http به https، ری‌استارت x-ui بعد از تمدید |
-| **11 HTTPS سایت** | کدام گواهی(ها) برای https سایت استفاده شوند |
+| **10 مدیریت گواهی‌ها** | تمدید، حذف، نمایش مسیر فایل‌ها برای x-ui، ری‌استارت x-ui بعد از تمدید |
+| **11 HTTP / HTTPS سایت** | روشن/خاموش کردن HTTP و HTTPS سایت، انتخاب گواهی، هدایت http به https |
 
 **هر تغییر امن است:** اول بررسی، بعد اعمال، بعد روی همه‌ی پورت‌ها تست؛ اگر چیزی کار نکند تنظیمات قبلی خودکار برمی‌گردد.
 
@@ -103,9 +104,20 @@ sudo xray-site
 **گواهی خودتان (منوی 9):** متن `-----BEGIN CERTIFICATE-----` و کلید را بچسبانید، یا مسیر فایل‌ها را بدهید.
 اسکریپت بررسی می‌کند که کلید مال همان گواهی باشد.
 
-**HTTPS سایت (منوی 11):** بعد از آن `https://دامنه:2082` سایت را با گواهی معتبر نشان می‌دهد، روی همان پورت‌های
-مشترک. اتصال‌های TLS با نام‌های دیگر (اینباندهای TLS یا REALITY در x-ui) مثل قبل به x-ui می‌روند. اگر یک اینباند
-x-ui از همان دامنه‌ی سایت استفاده کند، اسکریپت قبل از هر تغییری خبر می‌دهد.
+**HTTP / HTTPS سایت (منوی 11):** سه کلید جدا:
+
+| کلید | روشن | خاموش |
+|---|---|---|
+| **HTTP** | `http://IP:2082` سایت را نشان می‌دهد | اتصال بدون هیچ جوابی بسته می‌شود (انگار سایتی نیست) |
+| **HTTPS** | `https://دامنه:2082` با گواهی معتبر | سایتی روی https نیست؛ گواهی‌های انتخاب‌شده یادش می‌ماند |
+| **Redirect** | مرورگری که `http://دامنه` را باز کند به `https://دامنه` می‌رود (حتی وقتی HTTP خاموش است) | — |
+
+مثلاً «HTTP خاموش + HTTPS روشن + Redirect روشن» یعنی سایت فقط با https و دامنه باز می‌شود، `http://دامنه` به
+https می‌رود و باز کردن IP خالی هیچ چیزی نشان نمی‌دهد. **VPN در هیچ حالتی تحت تأثیر نیست** (حتی اینباندهای
+WebSocket یا XHTTP که خودشان روی HTTP هستند).
+
+HTTPS روی همان پورت‌های مشترک است؛ اتصال‌های TLS با نام‌های دیگر (اینباندهای TLS یا REALITY در x-ui) مثل قبل
+به x-ui می‌روند. اگر یک اینباند x-ui از همان دامنه‌ی سایت استفاده کند، اسکریپت قبل از هر تغییری خبر می‌دهد.
 
 **استفاده در x-ui:** منوی 10 ← 3 مسیر فایل‌ها را نشان می‌دهد (مثلاً `/etc/xray-site/certs/vpn.example.com/fullchain.pem`
 و `privkey.pem`) تا در تنظیمات پنل x-ui یا TLS اینباند بگذارید. با گزینه‌ی «Restart x-ui after a renewal»،
@@ -121,7 +133,8 @@ x-ui بعد از هر تمدید خودکار ری‌استارت می‌شود.
 | متن‌های سایت | `sudo xray-site site "NAME=فروشگاه من" "EMAIL=me@example.com"` |
 | گواهی رایگان | `sudo CF_Token=... xray-site cert issue vpn.example.com --method cloudflare` |
 | گواهی خودم | `sudo xray-site cert add mycert /root/cert.pem /root/key.pem --copy` |
-| HTTPS سایت | `sudo xray-site cert site vpn.example.com` · `cert site off` · `cert force-https on` |
+| انتخاب گواهی برای HTTPS | `sudo xray-site cert site vpn.example.com` |
+| روشن/خاموش | `sudo xray-site http off` · `https on` · `redirect on` (بدون on/off: وضعیت فعلی) |
 | وضعیت و لاگ | `sudo xray-site status` · `sudo xray-site logs nginx` |
 
 ## نکته‌ها

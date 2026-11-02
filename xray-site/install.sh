@@ -25,7 +25,8 @@
 #   xray-site template [name]                          list or choose the site template
 #   xray-site site NAME=... TAGLINE=... EMAIL=... PHONE=...   texts of the current template (--reset)
 #   xray-site cert list | issue <domain> | add <name> <cert> <key> [--copy] | paths <name>
-#   xray-site cert renew|remove <name> | site <name...>|off | force-https on|off | xui-restart on|off
+#   xray-site cert renew|remove <name> | site <name...>|off | xui-restart on|off
+#   xray-site http on|off | https on|off | redirect on|off     how browsers reach the site
 #   xray-site status | logs [xray-site|nginx|access|x-ui|acme] | restart [all|nginx|x-ui]
 #   xray-site public-ip <ip|auto> | update | uninstall
 #
@@ -71,6 +72,7 @@ listeners() { ss -ltnpH "sport = :$1" 2>/dev/null || true; }
 # "path host" for a WebSocket self-check, and whether x-ui gets real client IPs.
 declare -A MAP_INFO=() MAP_WS=() MAP_PP=()
 SITE_TLS_PORT="" SITE_CERTS="" FORCE_HTTPS=0 XUI_RESTART=0 SITE_TLS_CHECK="" SITE_ROOT=""
+HTTP_SITE=1 SITE_HTTPS=1 TLS_CERTS=""
 SITE_SNI_EXACT="" SITE_SNI_SUFFIX="" SITE_HOST_REGEX=""
 
 # ================================================================ config file
@@ -78,6 +80,7 @@ SITE_SNI_EXACT="" SITE_SNI_SUFFIX="" SITE_HOST_REGEX=""
 # in MAPS it is kept as "<server>:<x-ui>:<public>".
 load_conf() {
     SITE_PORT="" CONF_PUBLIC_IP="" MAPS=() SITE_TLS_PORT="" SITE_CERTS="" FORCE_HTTPS=0 XUI_RESTART=0
+    HTTP_SITE=1 SITE_HTTPS=1
     [ -f "$CONF" ] || return 0
     local line
     while IFS= read -r line || [ -n "$line" ]; do
@@ -90,6 +93,8 @@ load_conf() {
             SITE_TLS_PORT=*) SITE_TLS_PORT="${line#*=}" ;;
             SITE_CERTS=*)    SITE_CERTS="${line#*=}" ;;
             FORCE_HTTPS=*)   FORCE_HTTPS="${line#*=}" ;;
+            HTTP_SITE=*)     HTTP_SITE="${line#*=}" ;;
+            SITE_HTTPS=*)    SITE_HTTPS="${line#*=}" ;;
             XUI_RESTART=*)   XUI_RESTART="${line#*=}" ;;
             share=*)     local f="${line#*=}" sp sx ss
                          IFS=: read -r sp sx ss _ <<<"$f"
@@ -110,6 +115,9 @@ save_conf() {
         echo "# The port on this server is the public port unless given."
         echo "SITE_PORT=$SITE_PORT"
         echo "PUBLIC_IP=$CONF_PUBLIC_IP"
+        echo "# The site over http (1 = shown, 0 = connection closed) and over https (1 = on, 0 = off)"
+        echo "HTTP_SITE=$HTTP_SITE"
+        echo "SITE_HTTPS=$SITE_HTTPS"
         echo "# HTTPS for the site: certificate names (comma separated), its internal port, http -> https"
         echo "SITE_CERTS=$SITE_CERTS"
         echo "SITE_TLS_PORT=$SITE_TLS_PORT"
@@ -158,10 +166,10 @@ validate_maps() {
         pubs="$pubs$M_PUBLIC " seen="$seen$M_LISTEN " xuis="$xuis$M_XUI "
         [ "$M_LISTEN" != "$SITE_PORT" ] && [ "$M_XUI" != "$SITE_PORT" ] ||
             die "Port $SITE_PORT is the website's internal port; pick another, or move it with: xray-site site-port <port>"
-        [ -z "$SITE_CERTS" ] || { [ "$M_LISTEN" != "$SITE_TLS_PORT" ] && [ "$M_XUI" != "$SITE_TLS_PORT" ]; } ||
+        [ -z "$TLS_CERTS" ] || { [ "$M_LISTEN" != "$SITE_TLS_PORT" ] && [ "$M_XUI" != "$SITE_TLS_PORT" ]; } ||
             die "Port $SITE_TLS_PORT is the website's internal HTTPS port; pick another port."
     done
-    [ -z "$SITE_CERTS" ] || [ "$SITE_TLS_PORT" != "$SITE_PORT" ] || die "The site's HTTP and HTTPS ports must differ."
+    [ -z "$TLS_CERTS" ] || [ "$SITE_TLS_PORT" != "$SITE_PORT" ] || die "The site's HTTP and HTTPS ports must differ."
     for m in "${MAPS[@]}"; do
         split_map "$m"
         case "$xuis" in *" $M_LISTEN "*)
@@ -425,7 +433,7 @@ defaults
 backend site
     server site 127.0.0.1:$SITE_PORT send-proxy
 EOF
-    if [ -n "$SITE_CERTS" ]; then
+    if [ -n "$TLS_CERTS" ]; then
         printf '\nbackend site_tls\n    server site_tls 127.0.0.1:%s send-proxy\n' "$SITE_TLS_PORT" >> "$1"
     fi
     local m
@@ -437,7 +445,11 @@ EOF
 
 write_nginx_conf() {
     # HAProxy passes the visitor's address with the PROXY protocol, so nginx logs real IPs.
-    local redirect="" name
+    local redirect="" name http_body="        try_files \$uri \$uri/ =404;"
+    if [ "$HTTP_SITE" = 0 ]; then
+        # The site is off over http: close the connection without an answer.
+        http_body="        return 444;"
+    fi
     if [ "$FORCE_HTTPS" = 1 ] && [ -n "$SITE_HOST_REGEX" ]; then
         redirect="
     # Browsers asking for the site's domain over http go to https on the same port.
@@ -456,11 +468,11 @@ server {
     index index.html;
 $redirect
     location / {
-        try_files \$uri \$uri/ =404;
+$http_body
     }
 }
 EOF
-    for name in ${SITE_CERTS//,/ }; do
+    for name in ${TLS_CERTS//,/ }; do
         cert_meta "$name" || continue
         cat >> "$NGINX_CONF" <<EOF
 
@@ -582,7 +594,7 @@ Use another server port for public port $M_PUBLIC: xray-site change $M_PUBLIC $M
     if [ -n "$owners" ] && ! { grep -q '"nginx"' <<<"$owners" && grep -qs "127.0.0.1:$SITE_PORT " "$NGINX_CONF"; }; then
         die "The website's internal port $SITE_PORT is used by another program. Move it: xray-site site-port <port>"
     fi
-    if [ -n "$SITE_CERTS" ]; then
+    if [ -n "$TLS_CERTS" ]; then
         owners="$(listeners "$SITE_TLS_PORT")"
         if [ -n "$owners" ] && ! { grep -q '"nginx"' <<<"$owners" && grep -qs "127.0.0.1:$SITE_TLS_PORT ssl" "$NGINX_CONF"; }; then
             die "The website's internal HTTPS port $SITE_TLS_PORT is used by another program."
@@ -601,13 +613,25 @@ self_check() {
     local m code ws path host
     for m in "${MAPS[@]}"; do
         split_map "$m"
-        code=000
-        for _ in 1 2 3 4 5 6; do
-            code="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$M_LISTEN/" || true)"
-            [ "$code" = 200 ] && break
-            sleep 0.5
-        done
-        [ "$code" = 200 ] || { echo "port $M_LISTEN: the website answered HTTP $code instead of 200"; return 1; }
+        if [ "$HTTP_SITE" = 0 ]; then
+            # http is off: the port must accept the connection and close it without an answer.
+            local rc=0
+            for _ in 1 2 3 4 5 6; do
+                rc=0
+                curl -s --noproxy '*' -o /dev/null --max-time 5 "http://127.0.0.1:$M_LISTEN/" || rc=$?
+                [ "$rc" = 52 ] && break
+                sleep 0.5
+            done
+            [ "$rc" = 52 ] || { echo "port $M_LISTEN: http should get no answer, but curl ended with code $rc"; return 1; }
+        else
+            code=000
+            for _ in 1 2 3 4 5 6; do
+                code="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$M_LISTEN/" || true)"
+                [ "$code" = 200 ] && break
+                sleep 0.5
+            done
+            [ "$code" = 200 ] || { echo "port $M_LISTEN: the website answered HTTP $code instead of 200"; return 1; }
+        fi
         if [ -n "$SITE_TLS_CHECK" ]; then
             code="$(curl -sk --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 5 --resolve "$SITE_TLS_CHECK:$M_LISTEN:127.0.0.1" \
                 "https://$SITE_TLS_CHECK:$M_LISTEN/" || true)"
@@ -752,7 +776,11 @@ print_summary() {
             info="${XUI_REMARK:+\"$XUI_REMARK\" }$XUI_PROTO/$XUI_NET/$XUI_SEC" pp="$XUI_PP"
             [ -z "$XUI_ERROR" ] || { info="($XUI_ERROR)"; pp=x; }
         fi
-        printf '  http://%s:%s/   website + x-ui %s %s\n' "$ip" "$M_PUBLIC" "$M_XUI" "$info"
+        if [ "$HTTP_SITE" = 1 ]; then
+            printf '  http://%s:%s/   website + x-ui %s %s\n' "$ip" "$M_PUBLIC" "$M_XUI" "$info"
+        else
+            printf '  port %s (http site off)   x-ui %s %s\n' "$M_PUBLIC" "$M_XUI" "$info"
+        fi
         [ "$pp" = 0 ] && [[ "$note" != *" $M_XUI"* ]] && note="$note $M_XUI"
     done
     local lan; lan="$(lan_ip)"
@@ -976,10 +1004,11 @@ sni_is_site() {  # is TLS name $1 one of the site's HTTPS domains?
 prepare_site() {
     need_helper
     SITE_ROOT="$(python3 "$HELPER" render)" || die "The site template could not be prepared."
-    SITE_SNI_EXACT="" SITE_SNI_SUFFIX="" SITE_HOST_REGEX="" SITE_TLS_CHECK=""
-    [ -n "$SITE_CERTS" ] || return 0
+    SITE_SNI_EXACT="" SITE_SNI_SUFFIX="" SITE_HOST_REGEX="" SITE_TLS_CHECK="" TLS_CERTS=""
+    [ "$SITE_HTTPS" = 0 ] || TLS_CERTS="$SITE_CERTS"
+    [ -n "$TLS_CERTS" ] || return 0
     local name d re="" p m used first=""
-    for name in ${SITE_CERTS//,/ }; do
+    for name in ${TLS_CERTS//,/ }; do
         cert_meta "$name" || die "The site uses certificate \"$name\", which does not exist. Change it: xray-site cert site <name|off>"
         [ -r "$CM_CERT" ] && [ -r "$CM_KEY" ] || die "Certificate \"$name\": $CM_CERT or $CM_KEY cannot be read."
         python3 "$HELPER" certcheck "$CM_CERT" "$CM_KEY" >/dev/null ||
@@ -1248,7 +1277,10 @@ print_certs() {
         fi
         IFS=$'\t' read -r doms date days _ <<<"$info"
         if [ "$days" -lt 0 ]; then col="$CR"; elif [ "$days" -lt 15 ]; then col="$CY"; else col="$CG"; fi
-        used=""; [[ ",$SITE_CERTS," == *",$name,"* ]] && used="${CG}✓ https${C0}"
+        used=""
+        if [[ ",$SITE_CERTS," == *",$name,"* ]]; then
+            if [ "$SITE_HTTPS" = 0 ]; then used="${CD}https (off)${C0}"; else used="${CG}✓ https${C0}"; fi
+        fi
         doms="${doms//,/ }"
         printf '  %-3s %-24s %-8s %-30s %s%-18s%s %s\n' "$n" "${name:0:24}" "$CM_TYPE" "${doms:0:30}" \
             "$col" "$date ($days d)" "$C0" "$used"
@@ -1299,14 +1331,14 @@ cmd_cert() {
         site)
             need_installed
             [ $# -gt 0 ] || die "Usage: xray-site cert site <name> [name ...] | off"
-            if [ "$1" = off ]; then SITE_CERTS=""
+            if [ "$1" = off ]; then SITE_HTTPS=0
             else
                 local c list=""
                 for c in "$@"; do cert_meta "$c" || die "No certificate named \"$c\" (see: xray-site cert list)."; list="$list${list:+,}$c"; done
-                SITE_CERTS="$list"
+                SITE_CERTS="$list" SITE_HTTPS=1
             fi
             apply
-            if [ -n "$SITE_CERTS" ]; then
+            if [ -n "$TLS_CERTS" ]; then
                 local m; split_map "${MAPS[0]}"
                 say "The site now also answers HTTPS: https://$SITE_TLS_CHECK:$M_PUBLIC/"
             fi ;;
@@ -1329,6 +1361,65 @@ cmd_cert() {
             fi ;;
         *) die "Unknown: xray-site cert $sub (list, issue, add, paths, renew, remove, site, force-https, xui-restart)" ;;
     esac
+}
+
+# ================================================================ http / https of the site
+proto_status() {  # one line per protocol, for the menu and "xray-site http"
+    local https_txt red_txt
+    if [ "$SITE_HTTPS" = 1 ] && [ -n "$SITE_CERTS" ]; then https_txt="${CG}${CB}on${C0}   certificate(s): ${SITE_CERTS//,/, }"
+    elif [ -n "$SITE_CERTS" ]; then https_txt="${CD}off${C0}  (certificates kept: ${SITE_CERTS//,/, })"
+    else https_txt="${CD}off${C0}  (no certificate chosen yet)"; fi
+    if [ "$FORCE_HTTPS" = 1 ] && [ "$SITE_HTTPS" = 1 ] && [ -n "$SITE_CERTS" ]; then red_txt="${CG}${CB}on${C0}   http://domain goes to https://domain"
+    elif [ "$FORCE_HTTPS" = 1 ]; then red_txt="${CY}on${C0}   (does nothing while HTTPS is off)"
+    else red_txt="${CD}off${C0}"; fi
+    printf '  %-10s %s\n' "HTTP" "$(if [ "$HTTP_SITE" = 1 ]; then printf '%son%s   browsers get the site over http' "$CG$CB" "$C0"; else printf '%soff%s  http connections are closed without an answer' "$CR$CB" "$C0"; fi)"
+    printf '  %-10s %s\n' "HTTPS" "$https_txt"
+    printf '  %-10s %s\n' "Redirect" "$red_txt"
+}
+
+site_off_note() {
+    if [ "$HTTP_SITE" = 0 ] && { [ "$SITE_HTTPS" = 0 ] || [ -z "$SITE_CERTS" ]; }; then
+        warn "The site is completely off now: browsers get no answer. The VPN works as before."
+    fi
+}
+
+cmd_http() {
+    need_installed
+    case "${1:-}" in
+        on) HTTP_SITE=1 ;;
+        off) HTTP_SITE=0 ;;
+        "") proto_status; return 0 ;;
+        *) die "Usage: xray-site http on|off" ;;
+    esac
+    apply
+    say "The site over http is ${1}."
+    site_off_note
+}
+
+cmd_https() {
+    need_installed
+    case "${1:-}" in
+        on) [ -n "$SITE_CERTS" ] || die "Choose the certificate(s) first: xray-site cert site <name> (see: xray-site cert list)"
+            SITE_HTTPS=1 ;;
+        off) SITE_HTTPS=0 ;;
+        "") proto_status; return 0 ;;
+        *) die "Usage: xray-site https on|off" ;;
+    esac
+    apply
+    say "The site over https is ${1}."
+    site_off_note
+}
+
+cmd_redirect() {
+    need_installed
+    case "${1:-}" in
+        on) FORCE_HTTPS=1 ;;
+        off) FORCE_HTTPS=0 ;;
+        *) die "Usage: xray-site redirect on|off" ;;
+    esac
+    apply
+    say "Redirect from http to https is ${1}."
+    if [ "$FORCE_HTTPS" = 1 ] && [ -z "$TLS_CERTS" ]; then warn "It starts working once HTTPS is on."; fi
 }
 
 # ================================================================ template and site texts
@@ -1533,7 +1624,7 @@ cmd_menu() {
             8)  menu_cert_issue ;;
             9)  menu_cert_add ;;
             10) menu_certs ;;
-            11) menu_site_https ;;
+            11) menu_site_protocols ;;
             12) cmd_status ;;
             13) menu_logs ;;
             14) menu_restart ;;
@@ -1585,7 +1676,10 @@ status_box() {
     local tpl title https certs n=0 soon="" name info days
     tpl="$(python3 "$HELPER" site-get | python3 -c 'import json,sys; print(json.load(sys.stdin)["template"])' 2>/dev/null || echo '?')"
     title="$(python3 "$HELPER" templates 2>/dev/null | awk -F'\t' -v t="$tpl" '$1==t {print $2}')"
-    if [ -n "$SITE_CERTS" ]; then https="${CG}on${C0} (${SITE_CERTS//,/, })"; else https="${CD}off${C0}"; fi
+    https="$(onoff "$( [ "$SITE_HTTPS" = 1 ] && [ -n "$SITE_CERTS" ] && echo 1 || echo 0 )")"
+    https="${CD}HTTP${C0} $(onoff "$HTTP_SITE")  ${CD}HTTPS${C0} $https"
+    if [ "$SITE_HTTPS" = 1 ] && [ -n "$SITE_CERTS" ]; then https="$https (${SITE_CERTS//,/, })"; fi
+    if [ "$FORCE_HTTPS" = 1 ]; then https="$https  ${CD}redirect${C0} $(onoff 1)"; fi
     for name in $(cert_names); do
         n=$((n + 1)); cert_meta "$name"
         info="$(python3 "$HELPER" certinfo "$CM_CERT" 2>/dev/null || true)"
@@ -1600,7 +1694,8 @@ status_box() {
     box_top "Status"
     box_line "$(dot xray-site splitter)    $(dot nginx website)    $(dot x-ui x-ui)"
     box_line "${CD}Public IP${C0}  $(printf '%-18s' "$(public_ip)") ${CD}LAN${C0}  $(lan_ip)"
-    box_line "${CD}Site     ${C0}  ${CB}${title:-$tpl}${C0} ($tpl)   ${CD}HTTPS${C0} $https"
+    box_line "${CD}Site     ${C0}  ${CB}${title:-$tpl}${C0} ($tpl)"
+    box_line "${CD}Serving  ${C0}  $https"
     box_line "${CD}SSL      ${C0}  $certs"
     box_end
 }
@@ -1652,7 +1747,7 @@ main_menu_items() {
     echo
     menu_two_cols \
         "#Ports" "1|Add a port" "2|Change a port" "3|Remove a port" "4|Re-read x-ui and apply" "" \
-        "#SSL certificates" "8|Get a free certificate" "9|Add my own certificate" "10|Manage certificates" "11|HTTPS for the site" \
+        "#SSL certificates" "8|Get a free certificate" "9|Add my own certificate" "10|Manage certificates" "11|HTTP / HTTPS of the site" \
         -- \
         "#Website" "5|Choose the site template" "6|Edit the site texts" "7|Website internal port" "" "" \
         "#System" "12|Status and connections" "13|Logs" "14|Restart services" "15|Public IP" "16|Update xray-site" "17|Uninstall"
@@ -1715,7 +1810,7 @@ site_urls() {
     echo
     for m in "${MAPS[@]}"; do
         split_map "$m"
-        printf '    %shttp://%s:%s/%s\n' "$CC" "$ip" "$M_PUBLIC" "$C0"
+        [ "$HTTP_SITE" = 0 ] || printf '    %shttp://%s:%s/%s\n' "$CC" "$ip" "$M_PUBLIC" "$C0"
         local d tls_names="${SITE_SNI_EXACT:-$SITE_TLS_CHECK}"
         for d in $tls_names; do printf '    %shttps://%s:%s/%s\n' "$CC" "$d" "$M_PUBLIC" "$C0"; done
     done
@@ -1851,7 +1946,7 @@ menu_cert_add() {
 menu_apply_site_certs() {  # $1 name to add to the site's certificates
     local list="$SITE_CERTS"
     [[ ",$list," == *",$1,"* ]] || list="$list${list:+,}$1"
-    SITE_CERTS="$list"
+    SITE_CERTS="$list" SITE_HTTPS=1
     try_apply
     if [ "$APPLIED" = 1 ]; then say "HTTPS is on for the site:"; refresh_tls_check; site_urls; else warn "HTTPS was not turned on."; fi
 }
@@ -1871,18 +1966,14 @@ menu_certs() {
         print_certs
         printf '  %s  1%s  Renew            %s  2%s  Remove           %s  3%s  Show file paths (for x-ui)\n' \
             "$CB$CC" "$C0" "$CB$CC" "$C0" "$CB$CC" "$C0"
-        printf '  %s  4%s  Redirect http to https on the site: %s\n' "$CB$CC" "$C0" "$(onoff "$FORCE_HTTPS")"
-        printf '  %s  5%s  Restart x-ui after a renewal:       %s\n' "$CB$CC" "$C0" "$(onoff "$XUI_RESTART")"
+        printf '  %s  4%s  Restart x-ui after a renewal: %s\n' "$CB$CC" "$C0" "$(onoff "$XUI_RESTART")"
         printf '  %s  0%s  Back\n\n' "$CB$CC" "$C0"
         ask c "Choose" ""
         case "$c" in
             1) if pick_cert; then try_run cmd_cert renew "$PICKED"; fi ;;
             2) if pick_cert && yes_no "Remove certificate \"$PICKED\"" n; then try_run cmd_cert remove "$PICKED"; fi ;;
             3) if pick_cert; then show_cert_paths "$PICKED"; fi ;;
-            4) if [ "$FORCE_HTTPS" = 1 ]; then FORCE_HTTPS=0; else FORCE_HTTPS=1; fi
-               [ -n "$SITE_CERTS" ] || { echo "    Turn on HTTPS for the site first (menu 11)."; FORCE_HTTPS=0; }
-               try_apply ;;
-            5) if [ "$XUI_RESTART" = 1 ]; then XUI_RESTART=0; else XUI_RESTART=1; fi; save_conf "$CONF" ;;
+            4) if [ "$XUI_RESTART" = 1 ]; then XUI_RESTART=0; else XUI_RESTART=1; fi; save_conf "$CONF" ;;
             0|"") return 0 ;;
             *) echo "    Choose a number from the list." ;;
         esac
@@ -1892,28 +1983,56 @@ menu_certs() {
 
 onoff() { if [ "$1" = 1 ]; then printf '%son%s' "$CG$CB" "$C0"; else printf '%soff%s' "$CD" "$C0"; fi; }
 
-menu_site_https() {
+menu_site_protocols() {
+    local c
+    while :; do
+        load_conf
+        box_top "HTTP / HTTPS of the site"
+        proto_status
+        echo
+        printf '  %s  1%s  Turn HTTP %s\n' "$CB$CC" "$C0" "$([ "$HTTP_SITE" = 1 ] && echo off || echo on)"
+        printf '  %s  2%s  Turn HTTPS %s\n' "$CB$CC" "$C0" "$([ "$SITE_HTTPS" = 1 ] && [ -n "$SITE_CERTS" ] && echo off || echo on)"
+        printf '  %s  3%s  Choose the certificate(s) for HTTPS\n' "$CB$CC" "$C0"
+        printf '  %s  4%s  Turn the http -> https redirect %s\n' "$CB$CC" "$C0" "$([ "$FORCE_HTTPS" = 1 ] && echo off || echo on)"
+        printf '  %s  0%s  Back\n\n' "$CB$CC" "$C0"
+        ask c "Choose" ""
+        case "$c" in
+            1)  if [ "$HTTP_SITE" = 1 ]; then HTTP_SITE=0; else HTTP_SITE=1; fi
+                try_apply
+                if [ "$APPLIED" = 1 ]; then site_off_note; fi ;;
+            2)  if [ "$SITE_HTTPS" = 1 ] && [ -n "$SITE_CERTS" ]; then SITE_HTTPS=0
+                elif [ -z "$SITE_CERTS" ]; then menu_pick_site_certs; continue
+                else SITE_HTTPS=1; fi
+                try_apply
+                if [ "$APPLIED" = 1 ]; then site_off_note; refresh_tls_check; site_urls; fi ;;
+            3)  menu_pick_site_certs ;;
+            4)  if [ "$FORCE_HTTPS" = 1 ]; then FORCE_HTTPS=0; else FORCE_HTTPS=1; fi
+                try_apply
+                if [ "$APPLIED" = 1 ] && [ "$FORCE_HTTPS" = 1 ] && { [ "$SITE_HTTPS" = 0 ] || [ -z "$SITE_CERTS" ]; }; then
+                    echo "    The redirect starts working once HTTPS is on."
+                fi ;;
+            0|"") return 0 ;;
+            *)  echo "    Choose a number from the list." ;;
+        esac
+        echo
+    done
+}
+
+menu_pick_site_certs() {
     local names=() n pick list=""
     mapfile -t names < <(cert_names)
-    box_top "HTTPS for the site"
     if [ "${#names[@]}" = 0 ]; then echo "  No certificates yet: get one (8) or add yours (9) first."; return 0; fi
     print_certs
-    echo "  Numbers of the certificates to use, separated by commas (e.g. 1 or 1,2); 0 turns HTTPS off."
+    echo "  Numbers of the certificates to use for HTTPS, separated by commas (e.g. 1 or 1,2)."
     ask_text pick "Certificates" ""
     [ -n "$pick" ] || return 0
-    if [ "$pick" = 0 ]; then SITE_CERTS=""
-    else
-        for n in ${pick//,/ }; do
-            [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "${#names[@]}" ] || { echo "    No certificate number $n."; return 0; }
-            list="$list${list:+,}${names[$((n - 1))]}"
-        done
-        SITE_CERTS="$list"
-    fi
+    for n in ${pick//,/ }; do
+        [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "${#names[@]}" ] || { echo "    No certificate number $n."; return 0; }
+        list="$list${list:+,}${names[$((n - 1))]}"
+    done
+    SITE_CERTS="$list" SITE_HTTPS=1
     try_apply
-    if [ "$APPLIED" = 1 ]; then
-        if [ -n "$SITE_CERTS" ]; then say "HTTPS is on for the site:"; refresh_tls_check; site_urls
-        else say "HTTPS for the site is off."; fi
-    fi
+    if [ "$APPLIED" = 1 ]; then say "HTTPS is on for the site:"; refresh_tls_check; site_urls; fi
 }
 
 # ---------------------------------------------------------------- menu: system
@@ -2071,7 +2190,7 @@ take_lock() {
 cmd="${1:-}"
 [ $# -gt 0 ] && shift
 case "$cmd ${1:-}" in
-    "list "*|"ls "*|"status "*|"logs "*|"log "*|"cert reload"|"cert list"|"cert ls"|"cert paths"|"cert ") ;;
+    "list "*|"ls "*|"status "*|"logs "*|"log "*|"cert reload"|"cert list"|"cert ls"|"cert paths"|"cert "|"http "|"https ") ;;
     *) take_lock ;;
 esac
 case "$cmd" in
@@ -2088,6 +2207,9 @@ case "$cmd" in
     template|templates) cmd_template "$@" ;;
     site)       cmd_site "$@" ;;
     cert|certs|ssl) cmd_cert "$@" ;;
+    http)       cmd_http "$@" ;;
+    https)      cmd_https "$@" ;;
+    redirect)   cmd_redirect "$@" ;;
     restart)    cmd_restart "$@" ;;
     logs|log)   cmd_logs "$@" ;;
     public-ip)  cmd_public_ip "$@" ;;
