@@ -6,23 +6,24 @@
 # is mapped to. x-ui itself is never changed. Several ports can be mapped, to the same or to
 # different x-ui inbounds.
 #
+# Each entry needs two ports: the x-ui inbound, and the public port people connect to (on
+# the router). The router forwards that public port to the same port number on this server;
+# only if that number is taken here is another one used (the list shows which).
+#
 # Install (asks for the ports):   sudo bash install.sh
 # Afterwards, menu:               sudo xray-site
 # Or commands:
-#   xray-site list                          show the ports
-#   xray-site add <port> <x-ui port> [public port]
-#   xray-site change <port> <new port> [x-ui port] [public port]
-#   xray-site remove <port>
-#   xray-site site-port <port>              move the website's internal port
-#   xray-site apply                         re-read x-ui after changing an inbound there
+#   xray-site list                                     show the entries
+#   xray-site add <x-ui port> <public port> [server port]
+#   xray-site change <public port> <new public port> [x-ui port] [server port]
+#   xray-site remove <public port>
+#   xray-site site-port <port>                         move the website's internal port
+#   xray-site apply                                    re-read x-ui after changing an inbound
 #   xray-site status
 #   xray-site uninstall
 #
-# <port> is the port on this server (what the router forwards to). <public port> is only
-# shown in summaries: the port people use from the internet, if the router changes it.
 # The list lives in /etc/xray-site/xray-site.conf; after editing it by hand run "xray-site apply".
-#
-# Install without questions: sudo PORTS="1234:8080:8080 2345:8443" bash install.sh
+# Install without questions: sudo PORTS="123:2082 124:2083" bash install.sh  (x-ui port:public port)
 set -euo pipefail
 
 CONF_DIR=/etc/xray-site
@@ -48,7 +49,8 @@ listeners() { ss -ltnpH "sport = :$1" 2>/dev/null || true; }
 declare -A MAP_INFO=() MAP_WS=() MAP_PP=()
 
 # ================================================================ config file
-# SITE_PORT, CONF_PUBLIC_IP and MAPS (each "server-port:x-ui-port[:public-port]").
+# SITE_PORT, CONF_PUBLIC_IP and MAPS. In the file an entry is "share=<public>:<x-ui>[:<server>]";
+# in MAPS it is kept as "<server>:<x-ui>:<public>".
 load_conf() {
     SITE_PORT="" CONF_PUBLIC_IP="" MAPS=()
     [ -f "$CONF" ] || return 0
@@ -60,7 +62,10 @@ load_conf() {
             "") ;;
             SITE_PORT=*) SITE_PORT="${line#*=}" ;;
             PUBLIC_IP=*) CONF_PUBLIC_IP="${line#*=}" ;;
-            port=*)      MAPS+=("${line#*=}") ;;
+            share=*)     local f="${line#*=}" sp sx ss
+                         IFS=: read -r sp sx ss _ <<<"$f"
+                         MAPS+=("${ss:-$sp}:$sx:$sp") ;;
+            port=*)      MAPS+=("${line#*=}") ;;   # older format: <server>:<x-ui>:<public>
             *) die "$CONF: cannot understand this line: $line" ;;
         esac
     done < "$CONF"
@@ -72,11 +77,16 @@ save_conf() {
         echo "# Website + x-ui on shared ports."
         echo "# Change it with \"sudo xray-site\", or edit this file and run \"sudo xray-site apply\"."
         echo "#"
-        echo "# port=<port on this server>:<x-ui inbound port>[:<public port, only for display>]"
+        echo "# share=<public port on the router>:<x-ui inbound port>[:<port on this server>]"
+        echo "# The port on this server is the public port unless given."
         echo "SITE_PORT=$SITE_PORT"
         echo "PUBLIC_IP=$CONF_PUBLIC_IP"
         local m
-        for m in "${MAPS[@]}"; do echo "port=$m"; done
+        for m in "${MAPS[@]}"; do
+            split_map "$m"
+            if [ "$M_LISTEN" = "$M_PUBLIC" ]; then echo "share=$M_PUBLIC:$M_XUI"
+            else echo "share=$M_PUBLIC:$M_XUI:$M_LISTEN"; fi
+        done
     } > "$1"
 }
 
@@ -86,8 +96,12 @@ split_map() {
     M_PUBLIC="${M_PUBLIC:-$M_LISTEN}"
 }
 
-find_map() {  # index of the mapping whose server port is $1, or nothing
+find_map() {  # index of the entry whose public port (or else server port) is $1
     local i
+    for i in "${!MAPS[@]}"; do
+        split_map "${MAPS[$i]}"
+        [ "$M_PUBLIC" = "$1" ] && { echo "$i"; return 0; }
+    done
     for i in "${!MAPS[@]}"; do
         split_map "${MAPS[$i]}"
         [ "$M_LISTEN" = "$1" ] && { echo "$i"; return 0; }
@@ -98,23 +112,23 @@ find_map() {  # index of the mapping whose server port is $1, or nothing
 validate_maps() {
     [ "${#MAPS[@]}" -gt 0 ] || die "No ports configured. Add one with: xray-site add <port> <x-ui port>"
     valid_port "$SITE_PORT" || die "Website port \"$SITE_PORT\" is not a valid port."
-    local m seen=" " xuis=" "
+    local m seen=" " pubs=" " xuis=" $(xui_ports) "
     for m in "${MAPS[@]}"; do
         split_map "$m"
-        valid_port "$M_LISTEN" || die "\"$M_LISTEN\" in \"$m\" is not a valid port."
-        valid_port "$M_XUI"    || die "\"$M_XUI\" in \"$m\" is not a valid port."
-        valid_port "$M_PUBLIC" || die "\"$M_PUBLIC\" in \"$m\" is not a valid port."
-        case "$seen" in *" $M_LISTEN "*) die "Port $M_LISTEN is listed twice." ;; esac
-        seen="$seen$M_LISTEN "
-        xuis="$xuis$M_XUI "
-        [ "$M_LISTEN" != "$M_XUI" ] || die "Port $M_LISTEN cannot point to itself; the x-ui inbound needs its own port."
+        valid_port "$M_XUI"    || die "x-ui port \"$M_XUI\" is not a valid port."
+        valid_port "$M_PUBLIC" || die "Public port \"$M_PUBLIC\" is not a valid port."
+        valid_port "$M_LISTEN" || die "Server port \"$M_LISTEN\" is not a valid port."
+        case "$pubs" in *" $M_PUBLIC "*) die "Public port $M_PUBLIC is listed twice." ;; esac
+        case "$seen" in *" $M_LISTEN "*) die "Port $M_LISTEN on this server is used by two entries." ;; esac
+        pubs="$pubs$M_PUBLIC " seen="$seen$M_LISTEN " xuis="$xuis$M_XUI "
         [ "$M_LISTEN" != "$SITE_PORT" ] && [ "$M_XUI" != "$SITE_PORT" ] ||
             die "Port $SITE_PORT is the website's internal port; pick another, or move it with: xray-site site-port <port>"
     done
     for m in "${MAPS[@]}"; do
         split_map "$m"
         case "$xuis" in *" $M_LISTEN "*)
-            die "Port $M_LISTEN is both a shared port and an x-ui inbound port; they must differ." ;;
+            die "Port $M_LISTEN on this server is an x-ui inbound port, so the router cannot forward
+public port $M_PUBLIC to it. Use another server port: xray-site change $M_PUBLIC $M_PUBLIC $M_XUI <server port>" ;;
         esac
     done
 }
@@ -219,6 +233,20 @@ read_inbound() {  # $1 = x-ui port; sets XUI_*
     [ -z "$XUI_ERROR" ] || XUI_NET=unknown
 }
 
+xui_ports() {  # every inbound port in x-ui, space separated
+    [ -r "$XUI_DB" ] || return 0
+    if [ -z "${XUI_LIST_CACHE+x}" ]; then XUI_LIST_CACHE="$(xui_py list 2>/dev/null || true)"; fi
+    [ -n "$XUI_LIST_CACHE" ] || return 0
+    cut -f1 <<<"$XUI_LIST_CACHE" | tr '\n' ' '
+}
+
+lan_ip() {  # this server's address in the home network, for the router instructions
+    local ip
+    ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)"
+    [ -n "$ip" ] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    echo "${ip:-this-server}"
+}
+
 show_xui_inbounds() {
     [ -r "$XUI_DB" ] || return 0
     local rows
@@ -270,6 +298,14 @@ exactly like a browser opening the website. In x-ui give it a path such as
         esac
     fi
 
+    # HTTP proxy inbounds (http, mixed) speak HTTP too, but send what a browser never sends to
+    # a website: CONNECT, or a full URL in the request line.
+    case "$XUI_PROTO" in http|mixed)
+        rules="$rules
+    use_backend $be if HTTP METH_CONNECT
+    use_backend $be if HTTP { url_beg -i http:// }" ;;
+    esac
+
     local addr server
     case "$XUI_LISTEN" in ""|0.0.0.0|::|"[::]") addr=127.0.0.1 ;; *) addr="$XUI_LISTEN" ;; esac
     timeout 3 bash -c "exec 3<>/dev/tcp/$addr/$X" 2>/dev/null ||
@@ -298,7 +334,7 @@ EOF
                 "$([ "$XUI_PP" = 1 ] && echo " send-proxy-v2")" >> "$out" ;;
     esac
     # For the self-check and summary.
-    MAP_INFO[$L]="\"$XUI_REMARK\" $XUI_PROTO/$XUI_NET/$XUI_SEC"
+    MAP_INFO[$L]="${XUI_REMARK:+\"$XUI_REMARK\" }$XUI_PROTO/$XUI_NET/$XUI_SEC"
     MAP_WS[$L]=""
     if [ "$XUI_SEC" = none ] && { [ "$XUI_NET" = ws ] || [ "$XUI_NET" = httpupgrade ]; }; then
         MAP_WS[$L]="${XUI_PATHS%% *} ${XUI_HOSTS%% *}"
@@ -438,9 +474,14 @@ check_ports_free() {
         grep -q '"haproxy"' <<<"$owners" && systemctl is-active --quiet xray-site && continue
         # The first version of this script had nginx itself on the shared port.
         grep -q '"nginx"' <<<"$owners" && grep -qsE "listen $M_LISTEN( |;)" "$NGINX_CONF" && continue
-        die "Port $M_LISTEN is already used by another program:
+        if grep -q '"xray' <<<"$owners" || [[ " $(xui_ports) " == *" $M_LISTEN "* ]]; then
+            die "Port $M_LISTEN on this server belongs to x-ui (an inbound listens there), so public port
+$M_PUBLIC cannot be forwarded to it. Use another server port:
+  xray-site change $M_PUBLIC $M_PUBLIC $M_XUI <free port>"
+        fi
+        die "Port $M_LISTEN on this server is already used by another program:
 $owners
-Pick another port (and forward the router to it)."
+Use another server port for public port $M_PUBLIC: xray-site change $M_PUBLIC $M_PUBLIC $M_XUI <free port>"
     done
     owners="$(listeners "$SITE_PORT")"
     if [ -n "$owners" ] && ! { grep -q '"nginx"' <<<"$owners" && grep -qs "127.0.0.1:$SITE_PORT " "$NGINX_CONF"; }; then
@@ -478,6 +519,7 @@ self_check() {
 }
 
 apply() {
+    unset XUI_LIST_CACHE
     validate_maps
     check_ports_free
     mkdir -p "$CONF_DIR"
@@ -559,17 +601,22 @@ public_ip() {
     echo "$DETECTED_IP"
 }
 
+inbound_info() {  # $1 server port, $2 x-ui port: "name" protocol/transport/security
+    local info="${MAP_INFO[$1]:-}"
+    if [ -z "$info" ]; then
+        read_inbound "$2"
+        if [ -n "$XUI_ERROR" ]; then info="(not found in x-ui)"; else info="${XUI_REMARK:+\"$XUI_REMARK\" }$XUI_PROTO/$XUI_NET"; fi
+    fi
+    echo "$info"
+}
+
 print_list() {
-    local i=0 m info
-    printf '\n  %-3s %-13s %-11s %-13s %s\n' "#" "server port" "x-ui port" "public port" "x-ui inbound"
+    local i=0 m lan
+    lan="$(lan_ip)"
+    printf '\n  %-3s %-13s %-38s %s\n' "#" "public port" "x-ui inbound" "router forwards to"
     for m in "${MAPS[@]}"; do
         i=$((i + 1)); split_map "$m"
-        info="${MAP_INFO[$M_LISTEN]:-}"
-        if [ -z "$info" ]; then
-            read_inbound "$M_XUI"
-            if [ -n "$XUI_ERROR" ]; then info="($XUI_ERROR)"; else info="\"$XUI_REMARK\" $XUI_PROTO/$XUI_NET/$XUI_SEC"; fi
-        fi
-        printf '  %-3s %-13s %-11s %-13s %s\n' "$i" "$M_LISTEN" "$M_XUI" "$M_PUBLIC" "$info"
+        printf '  %-3s %-13s %-38s %s\n' "$i" "$M_PUBLIC" "$M_XUI $(inbound_info "$M_LISTEN" "$M_XUI")" "$lan:$M_LISTEN"
     done
     printf '\n  Website internal port: 127.0.0.1:%s    Files: %s\n\n' "$SITE_PORT" "$SITE_DIR"
 }
@@ -584,16 +631,22 @@ print_summary() {
         info="${MAP_INFO[$M_LISTEN]:-}" pp="${MAP_PP[$M_LISTEN]:-}"
         if [ -z "$info" ]; then   # the change was applied in a subshell (menu)
             read_inbound "$M_XUI"
-            info="\"$XUI_REMARK\" $XUI_PROTO/$XUI_NET/$XUI_SEC" pp="$XUI_PP"
+            info="${XUI_REMARK:+\"$XUI_REMARK\" }$XUI_PROTO/$XUI_NET/$XUI_SEC" pp="$XUI_PP"
             [ -z "$XUI_ERROR" ] || { info="($XUI_ERROR)"; pp=x; }
         fi
-        printf '  http://%s:%s/  ->  server port %s  ->  x-ui %s %s\n' "$ip" "$M_PUBLIC" "$M_LISTEN" "$M_XUI" "$info"
+        printf '  http://%s:%s/   website + x-ui %s %s\n' "$ip" "$M_PUBLIC" "$M_XUI" "$info"
         [ "$pp" = 0 ] && [[ "$note" != *" $M_XUI"* ]] && note="$note $M_XUI"
+    done
+    local lan; lan="$(lan_ip)"
+    echo
+    echo "  In the router, forward (TCP):"
+    for m in "${MAPS[@]}"; do
+        split_map "$m"
+        printf '    public %-6s ->  %s:%s\n' "$M_PUBLIC" "$lan" "$M_LISTEN"
     done
     cat <<EOF
 
-  Browsers get the website on these addresses; VPN clients use the links from the x-ui
-  panel, with the address $ip and the public port shown above.
+  In the VPN apps, use address $ip and the public port above (not the inbound's own port).
 EOF
     if [ -n "$note" ]; then
         cat <<EOF
@@ -624,12 +677,78 @@ ask_port() {  # $1 variable, $2 question, $3 default; repeats until valid
     printf -v "$1" '%s' "$v"
 }
 
-ask_mapping() {  # $1 default server port, $2 default x-ui port, $3 default public port; sets NEW_MAP
-    local l x p
-    ask_port l "Port on this server that the router forwards to" "$1"
-    ask_port x "x-ui inbound port to send VPN traffic to" "$2"
-    ask_port p "Public port people use (the router's outside port)" "${3:-$l}"
+# Why port $1 cannot be the server port of an entry ($2 = its x-ui port, $3 = row being
+# edited or -1). Prints nothing when the port is usable.
+server_port_problem() {
+    local l="$1" x="$2" row="$3" i owners
+    [ -n "$SITE_PORT" ] && [ "$l" = "$SITE_PORT" ] && { echo "is the website's internal port"; return; }
+    if [ "$l" = "$x" ] || [[ " $(xui_ports) " == *" $l "* ]]; then echo "is an x-ui inbound port"; return; fi
+    for i in "${!MAPS[@]}"; do
+        [ "$i" = "$row" ] && continue
+        split_map "${MAPS[$i]}"
+        [ "$M_LISTEN" = "$l" ] && { echo "is already used for public port $M_PUBLIC"; return; }
+        [ "$M_XUI" = "$l" ] && { echo "is an x-ui inbound port"; return; }
+    done
+    owners="$(listeners "$l")"
+    [ -n "$owners" ] || return 0
+    grep -q '"haproxy"' <<<"$owners" && systemctl is-active --quiet xray-site && return 0
+    grep -q '"nginx"' <<<"$owners" && grep -qsE "listen $l( |;)" "$NGINX_CONF" && return 0
+    echo "is used by $(grep -oE '\(\("[^"]+"' <<<"$owners" | head -1 | tr -d '("')"
+}
+
+suggest_server_port() {  # a usable server port near $1
+    local p
+    for p in $(seq $(( $1 + 1 )) $(( $1 + 30 ))) $(seq 20000 20200); do
+        valid_port "$p" && [ -z "$(server_port_problem "$p" "$2" "$3")" ] && { echo "$p"; return; }
+    done
+}
+
+# Asks for one entry. $1 default x-ui port, $2 default public port, $3 row being edited or -1.
+# Sets NEW_MAP ("server:x-ui:public").
+ask_mapping() {
+    local x p l why old_l="" old_p="" ports
+    if [ "$3" -ge 0 ]; then split_map "${MAPS[$3]}"; old_l="$M_LISTEN" old_p="$M_PUBLIC"; fi
+    ports="$(xui_ports)"
+    while :; do
+        ask_port x "x-ui inbound port (from the list above)" "$1"
+        if [ -n "$ports" ] && [[ " $ports " != *" $x "* ]]; then
+            echo "    $x is not an x-ui inbound. The inbound ports are: $ports"
+        elif [ -z "$ports" ] && ! timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$x" 2>/dev/null; then
+            echo "    Nothing answers on port $x. Enter the port of an x-ui inbound."
+        else
+            break
+        fi
+    done
+    while :; do
+        ask_port p "Public port people connect to (on the router)" "$2"
+        local i taken=""
+        for i in "${!MAPS[@]}"; do
+            [ "$i" = "$3" ] && continue
+            split_map "${MAPS[$i]}"; [ "$M_PUBLIC" = "$p" ] && taken=1
+        done
+        [ -z "$taken" ] && break
+        echo "    Public port $p is already in the list."
+    done
+    # The router forwards the public port to this server, normally to the same number.
+    if [ "$p" = "$old_p" ]; then l="$old_l"; else l="$p"; fi
+    why="$(server_port_problem "$l" "$x" "$3")"
+    if [ -n "$why" ]; then
+        echo "    Port $l on this server $why, so the router has to forward public port $p"
+        echo "    to another port here."
+        while :; do
+            ask_port l "Port on this server for the router to forward $p to" "$(suggest_server_port "$p" "$x" "$3")"
+            why="$(server_port_problem "$l" "$x" "$3")"
+            [ -z "$why" ] && break
+            echo "    Port $l $why."
+        done
+    fi
     NEW_MAP="$l:$x:$p"
+}
+
+first_free_inbound() {  # the first x-ui inbound port not yet in the list
+    local p m used=" "
+    for m in "${MAPS[@]}"; do split_map "$m"; used="$used$M_XUI "; done
+    for p in $(xui_ports); do [[ "$used" == *" $p "* ]] || { echo "$p"; return; }; done
 }
 
 yes_no() {  # $1 question, $2 default y|n
@@ -655,27 +774,34 @@ cmd_list() { need_installed; print_list; }
 
 cmd_add() {
     need_installed
-    [ $# -ge 2 ] || die "Usage: xray-site add <server port> <x-ui port> [public port]"
-    find_map "$1" >/dev/null && die "Port $1 is already in the list; use: xray-site change $1 ..."
-    MAPS+=("$1:$2:${3:-$1}")
+    [ $# -ge 2 ] || die "Usage: xray-site add <x-ui port> <public port> [server port]"
+    valid_port "$1" && valid_port "$2" || die "Usage: xray-site add <x-ui port> <public port> [server port]"
+    find_map "$2" >/dev/null && die "Public port $2 is already in the list; use: xray-site change $2 ..."
+    local l="${3:-$2}" why
+    why="$(server_port_problem "$l" "$1" -1)"
+    [ -z "$why" ] || die "Port $l on this server $why. Give the server port to forward public port $2 to:
+  xray-site add $1 $2 $(suggest_server_port "$2" "$1" -1)   (and forward the router's $2 to it)"
+    MAPS+=("$l:$1:$2")
     apply; print_summary
 }
 
 cmd_change() {
     need_installed
-    [ $# -ge 2 ] || die "Usage: xray-site change <server port> <new server port> [x-ui port] [public port]"
-    local i
+    [ $# -ge 2 ] || die "Usage: xray-site change <public port> <new public port> [x-ui port] [server port]"
+    local i l
     i="$(find_map "$1")" || die "Port $1 is not in the list (see: xray-site list)."
     split_map "${MAPS[$i]}"
-    # When the public port was simply the server port, it follows the new server port.
-    local pub="$M_PUBLIC"; [ "$M_PUBLIC" = "$M_LISTEN" ] && pub="$2"
-    MAPS[$i]="$2:${3:-$M_XUI}:${4:-$pub}"
+    # The server port follows the public port, unless it was different already or is given.
+    if [ -n "${4:-}" ]; then l="$4"
+    elif [ "$2" = "$M_PUBLIC" ] || [ "$M_LISTEN" != "$M_PUBLIC" ]; then l="$M_LISTEN"
+    else l="$2"; fi
+    MAPS[$i]="$l:${3:-$M_XUI}:$2"
     apply; print_summary
 }
 
 cmd_remove() {
     need_installed
-    [ $# -ge 1 ] || die "Usage: xray-site remove <server port>"
+    [ $# -ge 1 ] || die "Usage: xray-site remove <public port>"
     local i
     i="$(find_map "$1")" || die "Port $1 is not in the list (see: xray-site list)."
     [ "${#MAPS[@]}" -gt 1 ] || die "This is the last port. To remove everything use: xray-site uninstall"
@@ -724,6 +850,7 @@ cmd_menu() {
     is_tty || die "The menu needs a terminal. See: xray-site help"
     local c
     while :; do
+        unset XUI_LIST_CACHE   # pick up changes made in x-ui meanwhile
         print_list
         cat <<'EOF'
   1) Add a port
@@ -738,25 +865,21 @@ EOF
         echo
         case "$c" in
             1)  show_xui_inbounds
-                ask_mapping "" "" ""
-                split_map "$NEW_MAP"
-                if find_map "$M_LISTEN" >/dev/null; then echo "    Port $M_LISTEN is already in the list."; continue; fi
+                ask_mapping "$(first_free_inbound)" "" -1
                 MAPS+=("$NEW_MAP")
                 try_apply
                 if [ "$APPLIED" = 1 ]; then print_summary; else warn "Not added; nothing was changed."; fi ;;
             2)  pick_row || continue
                 split_map "${MAPS[$ROW]}"
                 show_xui_inbounds
-                # A public port equal to the server port follows the new server port.
-                if [ "$M_PUBLIC" = "$M_LISTEN" ]; then ask_mapping "$M_LISTEN" "$M_XUI" ""
-                else ask_mapping "$M_LISTEN" "$M_XUI" "$M_PUBLIC"; fi
+                ask_mapping "$M_XUI" "$M_PUBLIC" "$ROW"
                 MAPS[$ROW]="$NEW_MAP"
                 try_apply
                 if [ "$APPLIED" = 1 ]; then print_summary; else warn "Not changed; the previous setup is still running."; fi ;;
             3)  [ "${#MAPS[@]}" -gt 1 ] || { echo "    This is the last port; use \"xray-site uninstall\" to remove everything."; continue; }
                 pick_row || continue
                 split_map "${MAPS[$ROW]}"
-                yes_no "Remove port $M_LISTEN" n || continue
+                yes_no "Remove public port $M_PUBLIC (x-ui $M_XUI)" n || continue
                 unset 'MAPS[ROW]'; MAPS=("${MAPS[@]}")
                 try_apply
                 [ "$APPLIED" = 1 ] || warn "Not removed; nothing was changed." ;;
@@ -799,9 +922,13 @@ cmd_install() {
 
     load_conf
     if [ -n "${PORTS:-}" ]; then
-        local p
+        # Each item: <x-ui port>:<public port>[:<server port>]
+        local item px pp pl
         MAPS=()
-        for p in ${PORTS//,/ }; do MAPS+=("$p"); done
+        for item in ${PORTS//,/ }; do
+            IFS=: read -r px pp pl _ <<<"$item"
+            MAPS+=("${pl:-$pp}:$px:$pp")
+        done
     elif [ "${#MAPS[@]}" -gt 0 ]; then
         say "Keeping the ports from $CONF"
     elif [ -f "$HAPROXY_CONF" ] && grep -qE '^\s*bind :[0-9]+' "$HAPROXY_CONF"; then
@@ -816,12 +943,13 @@ cmd_install() {
     else
         echo
         show_xui_inbounds
-        echo "  Which ports should carry both the website and x-ui?"
-        ask_mapping 1234 8080 8080
-        MAPS=("$NEW_MAP")
-        while yes_no "Add another port" n; do
-            ask_mapping "" "" ""
+        echo "  For each x-ui inbound to share with the website, give its port and the public"
+        echo "  port people connect to on the router."
+        MAPS=()
+        while :; do
+            ask_mapping "$(first_free_inbound)" "" -1
             MAPS+=("$NEW_MAP")
+            yes_no "Add another" n || break
         done
         echo
     fi
@@ -922,7 +1050,7 @@ chmod -R a+rX "$SITE_DIR"
     print_summary
 }
 
-usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^set -euo/{/^set -euo/d;p}' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # ================================================================ main
 case "${1:-}" in help|-h|--help) usage; exit 0 ;; esac
