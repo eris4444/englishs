@@ -663,7 +663,8 @@ EOF
 # ================================================================ questions
 ask() {  # $1 variable, $2 question, $3 default
     local ans
-    read -r -p "  $2${3:+ [$3]}: " ans || true
+    read -r -p "  $2${3:+ [$3]}: " ans || { echo; die "No answer (input closed)."; }
+    ans="${ans//[[:space:]]/}"   # also drops a stray \r from terminals that send \r\n
     printf -v "$1" '%s' "${ans:-$3}"
 }
 
@@ -751,10 +752,19 @@ first_free_inbound() {  # the first x-ui inbound port not yet in the list
     for p in $(xui_ports); do [[ "$used" == *" $p "* ]] || { echo "$p"; return; }; done
 }
 
-yes_no() {  # $1 question, $2 default y|n
+# $1 question, $2 default y|n. Without a default an empty answer is asked again, so a stray
+# Enter (some terminals send two line breaks) never counts as "no". On a Persian keyboard
+# layout the y and n keys type غ and د, so those count too.
+yes_no() {
     local a
-    ask a "$1 (y/n)" "$2"
-    [[ "$a" =~ ^[Yy] ]]
+    while :; do
+        ask a "$1 (y/n)" "${2:-}"
+        case "$a" in
+            y|Y|yes|Yes|YES|غ|بله|آره) return 0 ;;
+            n|N|no|No|NO|د|نه|خیر)    return 1 ;;
+        esac
+        echo "    Please type y or n."
+    done
 }
 
 pick_row() {  # sets ROW to a mapping index chosen by number
@@ -949,7 +959,9 @@ cmd_install() {
         while :; do
             ask_mapping "$(first_free_inbound)" "" -1
             MAPS+=("$NEW_MAP")
-            yes_no "Add another" n || break
+            split_map "$NEW_MAP"
+            echo "    Added: public port $M_PUBLIC -> x-ui $M_XUI $(inbound_info "$M_LISTEN" "$M_XUI")"
+            yes_no "Add another inbound" || break
         done
         echo
     fi

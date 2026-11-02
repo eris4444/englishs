@@ -39,11 +39,16 @@ sudo bash install.sh
 ```
   x-ui inbound port (from the list above) [123]: 123          ← پورت اینباند
   Public port people connect to (on the router): 2082         ← پورت عمومی روتر
-  Add another (y/n) [n]: y                                    ← y برای اینباند بعدی
+    Added: public port 2082 -> x-ui 123 "Turkey" vmess/tcp
+  Add another inbound (y/n): y                                ← y برای اینباند بعدی
   x-ui inbound port (from the list above) [124]: 124
   Public port people connect to (on the router): 2083
-  Add another (y/n) [n]: n
+    Added: public port 2083 -> x-ui 124 "Germany" vmess/tcp
+  Add another inbound (y/n): n
 ```
+
+سؤال «Add another inbound» حتماً جواب `y` یا `n` می‌خواهد (با کیبورد فارسی `غ` و `د` هم قبول است)؛
+Enter خالی دوباره می‌پرسد.
 
 جواب‌ها همان لحظه بررسی می‌شوند: اگر پورتی که دادید اینباند x-ui نباشد، دوباره می‌پرسد. اگر پورت عمومی
 روی سرور آزاد نباشد (مثلاً خودش پورت یک اینباند باشد)، یک سؤال سوم می‌آید: «روتر به کدام پورت سرور فوروارد کند»
