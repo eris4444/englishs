@@ -37,7 +37,7 @@
   .icon { width:48px; height:48px; border-radius:12px; display:grid; place-items:center; color:#fff; font-weight:800; font-size:18px; }
   .item h3 { margin:0; font-size:16px; }
   .meta { color:var(--muted); font-size:13px; display:flex; gap:14px; flex-wrap:wrap; }
-  .dl { background:var(--ok); color:#fff; border:0; border-radius:10px; padding:9px 16px; font:inherit; font-size:14px; cursor:pointer; display:flex; align-items:center; gap:6px; white-space:nowrap; }
+  .dl { background:var(--ok); color:#fff; border:0; border-radius:10px; padding:9px 16px; font:inherit; font-size:14px; cursor:pointer; display:flex; align-items:center; gap:6px; white-space:nowrap; text-decoration:none; }
   .dl svg { width:16px; height:16px; }
   .empty { text-align:center; color:var(--muted); padding:30px; display:none; }
   section h2 { font-size:18px; margin:40px 0 14px; }
@@ -96,7 +96,7 @@
   <section id="features">
     <h2>چرا {{NAME}}؟</h2>
     <div class="features">
-      <div class="feature"><b>لینک مستقیم</b><p>همه فایل‌ها بدون واسطه و با قابلیت ادامه دانلود.</p></div>
+      <div class="feature"><b>از منبع رسمی</b><p>هر لینک به صفحه دانلود رسمی سازنده می‌رود؛ همیشه آخرین نسخه و بدون تغییر.</p></div>
       <div class="feature"><b>بررسی امنیتی</b><p>هر فایل پیش از انتشار با چند آنتی‌ویروس بررسی می‌شود.</p></div>
       <div class="feature"><b>نسخه‌های قدیمی</b><p>آرشیو نسخه‌های قبلی برای سازگاری با سیستم‌های قدیمی.</p></div>
       <div class="feature"><b>نیم‌بها</b><p>دانلود از سرورهای داخلی با ترافیک نیم‌بها.</p></div>
@@ -114,20 +114,20 @@
 
 <script>
   var files = [
-    ["7-Zip", "win", "24.08", "1.6 MB", "۱۴۰۵/۰۸/۰۲", "#1f6feb"],
-    ["VLC Media Player", "win", "3.0.21", "42 MB", "۱۴۰۵/۰۷/۲۸", "#f97316"],
-    ["Notepad++", "win", "8.7.1", "5.1 MB", "۱۴۰۵/۰۷/۲۵", "#22c55e"],
-    ["Telegram Desktop", "win", "5.6.3", "48 MB", "۱۴۰۵/۰۸/۰۱", "#0ea5e9"],
-    ["LibreOffice", "linux", "24.8.2", "320 MB", "۱۴۰۵/۰۷/۱۹", "#14b8a6"],
-    ["GIMP", "linux", "2.10.38", "290 MB", "۱۴۰۵/۰۷/۱۲", "#8b5cf6"],
-    ["Firefox", "mac", "131.0", "140 MB", "۱۴۰۵/۰۸/۰۲", "#ef4444"],
-    ["Visual Studio Code", "mac", "1.95.1", "195 MB", "۱۴۰۵/۰۷/۳۰", "#3b82f6"],
-    ["Signal", "android", "7.24.2", "62 MB", "۱۴۰۵/۰۷/۲۷", "#2563eb"],
-    ["NewPipe", "android", "0.27.2", "11 MB", "۱۴۰۵/۰۷/۲۲", "#dc2626"],
-    ["K-9 Mail", "android", "8.2", "9.4 MB", "۱۴۰۵/۰۷/۱۵", "#f59e0b"],
-    ["SuperTuxKart", "game", "1.4", "680 MB", "۱۴۰۵/۰۶/۳۰", "#10b981"],
-    ["0 A.D.", "game", "0.27", "1.9 GB", "۱۴۰۵/۰۶/۲۴", "#a855f7"],
-    ["Mindustry", "game", "146", "160 MB", "۱۴۰۵/۰۶/۱۸", "#e11d48"]
+    ["7-Zip", "win", "24.08", "1.6 MB", "۱۴۰۵/۰۸/۰۲", "#1f6feb", "https://www.7-zip.org/download.html"],
+    ["VLC Media Player", "win", "3.0.21", "42 MB", "۱۴۰۵/۰۷/۲۸", "#f97316", "https://www.videolan.org/vlc/"],
+    ["Notepad++", "win", "8.7.1", "5.1 MB", "۱۴۰۵/۰۷/۲۵", "#22c55e", "https://notepad-plus-plus.org/downloads/"],
+    ["Telegram Desktop", "win", "5.6.3", "48 MB", "۱۴۰۵/۰۸/۰۱", "#0ea5e9", "https://desktop.telegram.org/"],
+    ["LibreOffice", "linux", "24.8.2", "320 MB", "۱۴۰۵/۰۷/۱۹", "#14b8a6", "https://www.libreoffice.org/download/download-libreoffice/"],
+    ["GIMP", "linux", "2.10.38", "290 MB", "۱۴۰۵/۰۷/۱۲", "#8b5cf6", "https://www.gimp.org/downloads/"],
+    ["Firefox", "mac", "131.0", "140 MB", "۱۴۰۵/۰۸/۰۲", "#ef4444", "https://www.mozilla.org/firefox/new/"],
+    ["Visual Studio Code", "mac", "1.95.1", "195 MB", "۱۴۰۵/۰۷/۳۰", "#3b82f6", "https://code.visualstudio.com/Download"],
+    ["Signal", "android", "7.24.2", "62 MB", "۱۴۰۵/۰۷/۲۷", "#2563eb", "https://signal.org/download/"],
+    ["NewPipe", "android", "0.27.2", "11 MB", "۱۴۰۵/۰۷/۲۲", "#dc2626", "https://newpipe.net/"],
+    ["K-9 Mail", "android", "8.2", "9.4 MB", "۱۴۰۵/۰۷/۱۵", "#f59e0b", "https://k9mail.app/"],
+    ["SuperTuxKart", "game", "1.4", "680 MB", "۱۴۰۵/۰۶/۳۰", "#10b981", "https://supertuxkart.net/Download"],
+    ["0 A.D.", "game", "0.27", "1.9 GB", "۱۴۰۵/۰۶/۲۴", "#a855f7", "https://play0ad.com/download/"],
+    ["Mindustry", "game", "146", "160 MB", "۱۴۰۵/۰۶/۱۸", "#e11d48", "https://anuke.itch.io/mindustry"]
   ];
   var cat = "all", list = document.getElementById("list");
   function render() {
@@ -139,13 +139,14 @@
       var el = document.createElement("div");
       el.className = "item";
       el.innerHTML = '<div class="icon"></div><div><h3></h3><div class="meta"><span></span><span></span><span></span></div></div>' +
-        '<button class="dl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>دانلود</button>';
+        '<a class="dl" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>دانلود</a>';
       el.querySelector(".icon").style.background = f[5];
       el.querySelector(".icon").textContent = f[0][0];
       el.querySelector("h3").textContent = f[0];
       var m = el.querySelectorAll(".meta span");
       m[0].textContent = "نسخه " + f[2]; m[1].textContent = "حجم " + f[3]; m[2].textContent = f[4];
-      el.querySelector(".dl").onclick = function () { toast("لینک دانلود «" + f[0] + "» در حال آماده‌سازی است…"); };
+      el.querySelector(".dl").href = f[6];
+      el.querySelector(".dl").title = "دانلود " + f[0] + " از سایت رسمی";
       list.appendChild(el);
     });
     document.getElementById("empty").style.display = n ? "none" : "block";

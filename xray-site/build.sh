@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mark=__XRAY_SITE_PAYLOAD__
 payload() {
-    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=2026-01-01 -cf - helper.py templates |
+    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=2026-01-01 -cf - helper.py panels.sh templates |
         gzip -9n | base64 -w 76
 }
 head_part="$(sed "/^$mark\$/,\$d" install.sh)"

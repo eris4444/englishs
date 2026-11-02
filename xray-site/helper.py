@@ -12,6 +12,16 @@
     helper.py certinfo <file>           tab separated: domains (comma separated), expiry date, days left, issuer
     helper.py certcheck <cert> <key>    exit 0 when the key belongs to the certificate
 
+Marzban API (the panel on this server, or XS_MZ_URL / XS_MZ_USER / XS_MZ_PASS for another one):
+    helper.py mz-wait <seconds>                     wait until the panel accepts a login
+    helper.py mz-node-cert                          the certificate nodes need (PEM)
+    helper.py mz-nodes                              id, name, address, ports, status, message (tab separated)
+    helper.py mz-node-add <name> <address> [port] [api port]   prints the new node's id
+    helper.py mz-node-wait <id> <seconds>           wait for "connected"; prints the status
+    helper.py mz-node-remove <id>
+    helper.py mz-links <address> <json {inbound port: public port}>   address and port in client links
+    helper.py mz-inbounds [xray_config.json]        tag, protocol, port (tab separated)
+
 Only the Python standard library is used.
 """
 import datetime
@@ -21,9 +31,11 @@ import os
 import re
 import shutil
 import ssl
+import struct
 import sys
 import tempfile
 import time
+import zlib
 
 SHARE = os.environ.get("XS_SHARE", "/usr/local/share/xray-site")
 CONF_DIR = os.environ.get("XS_CONF_DIR", "/etc/xray-site")
@@ -119,6 +131,86 @@ def render_html(name, site):
     return re.sub(r"\{\{([A-Z_]+)\}\}", sub, text)
 
 
+# ------------------------------------------------------------------ the small things a real site has
+PLAIN = {"nginx"}   # templates shown exactly as they are (the stock nginx page has no extras)
+
+
+def favicon_svg(letter, color):
+    letter = html.escape((letter or "•")[:1])
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" '
+            f'fill="{color}"/><text x="32" y="44" font-family="Tahoma,Arial,sans-serif" font-size="34" '
+            f'font-weight="700" text-anchor="middle" fill="#fff">{letter}</text></svg>\n')
+
+
+def favicon_ico(color):
+    """A 32x32 rounded square in the template's colour, as a PNG inside an .ico file."""
+    try:
+        r, g, b = (int(color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        r, g, b = 99, 102, 241
+    size, rad = 32, 7
+    rows = []
+    for y in range(size):
+        row = bytearray([0])
+        for x in range(size):
+            dx = max(rad - x, 0, x - (size - 1 - rad))
+            dy = max(rad - y, 0, y - (size - 1 - rad))
+            inside = dx * dx + dy * dy <= rad * rad
+            row += bytes([r, g, b, 255 if inside else 0])
+        rows.append(bytes(row))
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b""))
+    return struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHII", size, size, 0, 0, 1, 32, len(png), 22) + png
+
+
+def page_404(name, color, lang):
+    fa = lang != "en"
+    title = "صفحه پیدا نشد" if fa else "Page not found"
+    text = ("صفحه‌ای که دنبالش بودید وجود ندارد یا جابه‌جا شده است." if fa
+            else "The page you are looking for does not exist or has been moved.")
+    home = "بازگشت به صفحه اصلی" if fa else "Back to the home page"
+    name = html.escape(name or "")
+    return f"""<!doctype html>
+<html lang="{'fa' if fa else 'en'}" dir="{'rtl' if fa else 'ltr'}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>404 | {name or title}</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+  body {{ margin:0; min-height:100vh; display:grid; place-items:center; background:#f6f7fb; color:#1c2030;
+         font-family: Vazirmatn, IRANSans, Tahoma, "Segoe UI", sans-serif; text-align:center; padding:16px; }}
+  @media (prefers-color-scheme: dark) {{ body {{ background:#11131a; color:#e6e8ef; }} }}
+  b {{ display:block; font-size:96px; line-height:1; color:{color}; }}
+  h1 {{ font-size:22px; margin:12px 0 6px; }}
+  p {{ opacity:.7; margin:0 0 22px; }}
+  a {{ display:inline-block; background:{color}; color:#fff; text-decoration:none; padding:10px 22px; border-radius:12px; }}
+</style>
+</head>
+<body><div><b>404</b><h1>{title}</h1><p>{text}</p><a href="/">{home}</a></div></body>
+</html>
+"""
+
+
+def head_extras(text, v, color):
+    """Favicon, description and theme colour in <head>, unless the template already has them."""
+    if 'rel="icon"' in text or "</head>" not in text:
+        return text
+    desc = html.escape(v.get("TAGLINE", ""), quote=True)
+    title = html.escape(v.get("NAME", ""), quote=True)
+    extra = ('<link rel="icon" href="/favicon.svg" type="image/svg+xml">\n'
+             '<link rel="alternate icon" href="/favicon.ico">\n'
+             f'<meta name="theme-color" content="{color}">\n')
+    if desc:
+        extra += f'<meta name="description" content="{desc}">\n<meta property="og:description" content="{desc}">\n'
+    if title:
+        extra += f'<meta property="og:title" content="{title}">\n<meta property="og:type" content="website">\n'
+    return text.replace("</head>", extra + "</head>", 1)
+
+
 def site_root(site=None):
     site = site or site_get()
     return CUSTOM_DIR if site["template"] == "custom" else os.path.join(SITES_DIR, site["template"])
@@ -157,10 +249,27 @@ def render_site():
         if fn == "meta.json" or not os.path.isfile(p):
             continue
         if fn == "index.html":
+            body = render_html(name, site)
+            if name not in PLAIN:
+                meta = read_json(os.path.join(src, "meta.json"), {})
+                body = head_extras(body, effective_vars(name, site), meta.get("accent", "#6366f1"))
             with open(os.path.join(tmp, fn), "w", encoding="utf-8") as f:
-                f.write(render_html(name, site))
+                f.write(body)
         else:
             shutil.copy(p, tmp)
+    if name not in PLAIN:
+        meta = read_json(os.path.join(src, "meta.json"), {})
+        color, v = meta.get("accent", "#6366f1"), effective_vars(name, site)
+        extras = {"favicon.svg": favicon_svg(v.get("NAME") or meta.get("title_en", name), color),
+                  "robots.txt": "User-agent: *\nAllow: /\n",
+                  "404.html": page_404(v.get("NAME", ""), color, meta.get("lang", "fa"))}
+        for fn, body in extras.items():
+            if not os.path.exists(os.path.join(tmp, fn)):
+                with open(os.path.join(tmp, fn), "w", encoding="utf-8") as f:
+                    f.write(body)
+        if not os.path.exists(os.path.join(tmp, "favicon.ico")):
+            with open(os.path.join(tmp, "favicon.ico"), "wb") as f:
+                f.write(favicon_ico(color))
     make_readable(tmp)
     old = dest + ".old"
     shutil.rmtree(old, ignore_errors=True)
@@ -214,11 +323,148 @@ def cert_info(path):
     return names, date, days, issuer
 
 
+# ------------------------------------------------------------------ Marzban API
+MZ_ENV = os.environ.get("XS_MZ_ENV", "/opt/marzban/.env")
+MZ_XRAY = os.environ.get("XS_MZ_XRAY", "/var/lib/marzban/xray_config.json")
+
+
+def env_file(path):
+    out = {}
+    try:
+        for line in open(path, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return out
+
+
+class Marzban:
+    def __init__(self):
+        import urllib.request
+        if os.environ.get("XS_MZ_URL"):
+            self.base = os.environ["XS_MZ_URL"].rstrip("/")
+            self.user, self.pw = os.environ.get("XS_MZ_USER", ""), os.environ.get("XS_MZ_PASS", "")
+        else:
+            e = env_file(MZ_ENV)
+            scheme = "https" if e.get("UVICORN_SSL_CERTFILE") else "http"
+            self.base = f"{scheme}://127.0.0.1:{e.get('UVICORN_PORT', '8000')}"
+            self.user, self.pw = e.get("SUDO_USERNAME", ""), e.get("SUDO_PASSWORD", "")
+        # Local panels use their own (often self-signed) certificate; never go through a proxy.
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                                  urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+        self.token = None
+
+    def req(self, method, path, data=None, form=None, quiet=False):
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        headers, body = {"Accept": "application/json"}, None
+        if form is not None:
+            body, headers["Content-Type"] = urllib.parse.urlencode(form).encode(), "application/x-www-form-urlencoded"
+        elif data is not None:
+            body, headers["Content-Type"] = json.dumps(data).encode(), "application/json"
+        if self.token:
+            headers["Authorization"] = "Bearer " + self.token
+        r = urllib.request.Request(self.base + path, data=body, headers=headers, method=method)
+        try:
+            with self.opener.open(r, timeout=20) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")
+            try:
+                detail = json.loads(detail).get("detail", detail)
+            except Exception:
+                pass
+            raise SystemExit(f"Marzban answered {e.code} to {method} {path}: {detail}")
+        except Exception as e:
+            if quiet:
+                raise
+            raise SystemExit(f"Cannot reach Marzban at {self.base}: {e}")
+        return json.loads(raw) if raw else None
+
+    def login(self, quiet=False):
+        self.token = None
+        self.token = self.req("POST", "/api/admin/token", form={"username": self.user, "password": self.pw},
+                              quiet=quiet)["access_token"]
+        return self
+
+
+def xray_inbounds(path):
+    try:
+        cfg = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [i for i in cfg.get("inbounds", []) if isinstance(i, dict) and i.get("port")]
+
+
+def mz_command(cmd, args):
+    if cmd == "mz-inbounds":
+        for i in xray_inbounds(args[0] if args else MZ_XRAY):
+            print(f"{i.get('tag', '')}\t{i.get('protocol', '')}\t{i.get('port')}")
+        return 0
+    mz = Marzban()
+    if cmd == "mz-wait":
+        end = time.time() + int(args[0] if args else 120)
+        while True:
+            try:
+                mz.login(quiet=True)
+                print("ready")
+                return 0
+            except (Exception, SystemExit) as e:
+                if time.time() > end:
+                    print(f"not ready: {e}", file=sys.stderr)
+                    return 1
+                time.sleep(3)
+    mz.login()
+    if cmd == "mz-node-cert":
+        print(mz.req("GET", "/api/node/settings")["certificate"].strip())
+    elif cmd == "mz-nodes":
+        for n in mz.req("GET", "/api/nodes") or []:
+            msg = (n.get("message") or "").replace("\t", " ").replace("\n", " ")[:120]
+            print(f"{n['id']}\t{n['name']}\t{n['address']}\t{n['port']}\t{n['api_port']}\t{n.get('status', '')}\t{msg}")
+    elif cmd == "mz-node-add":
+        name, address = args[0], args[1]
+        port = int(args[2]) if len(args) > 2 else 62050
+        api_port = int(args[3]) if len(args) > 3 else 62051
+        n = mz.req("POST", "/api/node", data={"name": name, "address": address, "port": port, "api_port": api_port,
+                                             "add_as_new_host": True, "usage_coefficient": 1})
+        print(n["id"])
+    elif cmd == "mz-node-wait":
+        node_id, end = int(args[0]), time.time() + int(args[1] if len(args) > 1 else 90)
+        while True:
+            n = mz.req("GET", f"/api/node/{node_id}")
+            if n.get("status") == "connected" or time.time() > end:
+                print(f"{n.get('status')}\t{n.get('message') or ''}")
+                return 0 if n.get("status") == "connected" else 1
+            time.sleep(3)
+    elif cmd == "mz-node-remove":
+        mz.req("DELETE", f"/api/node/{int(args[0])}")
+    elif cmd == "mz-links":
+        address, portmap = args[0], json.loads(args[1] if len(args) > 1 else "{}")
+        ports = {i.get("tag"): str(i.get("port")) for i in xray_inbounds(MZ_XRAY)}
+        hosts = mz.req("GET", "/api/hosts") or {}
+        for tag, lst in hosts.items():
+            public = portmap.get(ports.get(tag, ""))
+            for h in lst:
+                h["address"] = address
+                h["port"] = int(public) if public else None
+        mz.req("PUT", "/api/hosts", data=hosts)
+        print(f"{sum(len(v) for v in hosts.values())} link(s) now use {address}")
+    else:
+        raise SystemExit(f"unknown command {cmd}")
+    return 0
+
+
 def main(argv):
     if not argv:
         print(__doc__)
         return 1
     cmd, args = argv[0], argv[1:]
+    if cmd.startswith("mz-"):
+        return mz_command(cmd, args)
     if cmd == "templates":
         for t in list_templates():
             print(f"{t['name']}\t{t['title']}\t{t['description']}")
